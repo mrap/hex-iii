@@ -630,7 +630,8 @@ pub async fn start_local_worker(worker_name: &str, worker_path: &str, port: u16)
 
     let mounts = build_local_mounts(project_path);
 
-    super::worker_manager::libkrun::run_dev(
+    let managed_dir_for_watcher = managed_dir.clone();
+    let exit_code = super::worker_manager::libkrun::run_dev(
         language,
         worker_path,
         exec_path,
@@ -643,7 +644,95 @@ pub async fn start_local_worker(worker_name: &str, worker_path: &str, port: u16)
         worker_name,
         &mounts,
     )
-    .await
+    .await;
+
+    // Spawn the host-side source watcher sidecar. Virtiofs doesn't
+    // propagate inotify, so in-VM watchers (tsx watch, node --watch,
+    // cargo watch, etc.) don't see host edits — we watch from the host
+    // and re-invoke `iii-worker start` on change to kill+restart.
+    //
+    // Only spawn after the VM was successfully started; otherwise a
+    // watcher fire would race into kill_stale_worker against nothing.
+    if exit_code == 0
+        && let Err(e) = spawn_source_watcher(worker_name, project_path, &managed_dir_for_watcher)
+    {
+        eprintln!(
+            "  {} source watcher failed to start: {}. Source edits will not auto-restart.",
+            "warning:".yellow(),
+            e
+        );
+    }
+
+    exit_code
+}
+
+/// Spawn the hidden `__watch-source` sidecar process, detached, with
+/// its PID recorded so `kill_stale_worker` can reap it on stop.
+fn spawn_source_watcher(
+    worker_name: &str,
+    project_path: &Path,
+    managed_dir: &Path,
+) -> std::io::Result<()> {
+    use std::path::PathBuf;
+
+    // If a watcher is already running for this worker (stale PID file
+    // from a crashed previous start), kill it first so we don't stack
+    // sidecars that fight over the same project dir.
+    let pid_file = managed_dir.join("watch.pid");
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_file)
+        && let Ok(pid) = pid_str.trim().parse::<i32>()
+    {
+        #[cfg(unix)]
+        unsafe {
+            nix::libc::kill(pid, nix::libc::SIGTERM);
+        }
+    }
+    let _ = std::fs::remove_file(&pid_file);
+
+    let self_exe = std::env::current_exe()?;
+    let logs_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".iii/logs")
+        .join(worker_name);
+    std::fs::create_dir_all(&logs_dir)?;
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(logs_dir.join("watcher.log"))?;
+    let log_file2 = log_file.try_clone()?;
+
+    let project_abs =
+        std::fs::canonicalize(project_path).unwrap_or_else(|_| project_path.to_path_buf());
+
+    let mut cmd = std::process::Command::new(&self_exe);
+    cmd.arg("__watch-source")
+        .arg("--worker")
+        .arg(worker_name)
+        .arg("--project")
+        .arg(&project_abs)
+        .stdin(std::process::Stdio::null())
+        .stdout(log_file)
+        .stderr(log_file2);
+
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            nix::unistd::setsid().map_err(std::io::Error::other)?;
+            Ok(())
+        });
+    }
+
+    let child = cmd.spawn()?;
+    let pid = child.id();
+    let _ = std::fs::write(&pid_file, pid.to_string());
+
+    eprintln!(
+        "  {} source watcher online (pid: {})",
+        "\u{2713}".green(),
+        pid
+    );
+    Ok(())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

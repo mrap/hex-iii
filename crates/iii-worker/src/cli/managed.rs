@@ -605,6 +605,9 @@ pub async fn kill_stale_worker(worker_name: &str) {
     let home = dirs::home_dir().unwrap_or_default();
     let pid_files = [
         home.join(".iii/managed").join(worker_name).join("vm.pid"),
+        home.join(".iii/managed")
+            .join(worker_name)
+            .join("watch.pid"),
         home.join(".iii/pids").join(format!("{}.pid", worker_name)),
     ];
 
@@ -1103,6 +1106,17 @@ pub async fn handle_managed_stop(worker_name: &str, _address: &str, _port: u16) 
 
     match mode {
         StopMode::Managed { pid, pidfile } => {
+            // Tear down the source watcher sidecar first so it doesn't
+            // observe the VM shutdown as a file event and try to restart.
+            let watch_pidfile = home
+                .join(".iii/managed")
+                .join(worker_name)
+                .join("watch.pid");
+            if let Some(watch_pid) = read_pid(&watch_pidfile) {
+                kill_pid_with_grace(watch_pid).await;
+            }
+            let _ = std::fs::remove_file(&watch_pidfile);
+
             let adapter = super::worker_manager::create_adapter("libkrun");
             let _ = adapter.stop(&pid.to_string(), 10).await;
             if let Some(f) = pidfile {
