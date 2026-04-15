@@ -17,6 +17,8 @@ export III_TELEMETRY_ENABLED := false
         engine-build engine-test engine-fmt-check \
         engine-up engine-up-bridges engine-down \
         init-build-x86 init-build-aarch64 init-build-all \
+        supervisor-build-x86 supervisor-build-aarch64 supervisor-build-all \
+        supervisor-install \
         sandbox sandbox-debug \
         test-sdk-node test-sdk-python test-sdk-rust test-sdk-all \
         test-motia-js test-motia-py \
@@ -70,7 +72,13 @@ engine-down:
 
 INIT_CRATE := iii-init
 WORKER_CRATE := iii-worker
+SUPERVISOR_CRATE := iii-supervisor
 WORKER_EMBED_FEATURES := embed-init,embed-libkrunfw
+
+# Where the host-side resolver looks for the supervisor binary.
+# Matches supervisor_provision.rs::resolve_supervisor_binary tier 2.
+SUPERVISOR_INSTALL_DIR := $(HOME)/.iii/lib
+SUPERVISOR_INSTALL_PATH := $(SUPERVISOR_INSTALL_DIR)/iii-supervisor
 
 init-build-x86:
 	cargo build -p $(INIT_CRATE) --target x86_64-unknown-linux-musl --release
@@ -79,6 +87,28 @@ init-build-aarch64:
 	cargo build -p $(INIT_CRATE) --target aarch64-unknown-linux-musl --release
 
 init-build-all: init-build-x86 init-build-aarch64
+
+# ── Supervisor Cross-Compilation ─────────────────────────────────────────────
+# Cross-compiled for the guest VM's Linux musl target. Separate from the
+# host iii-worker build because the supervisor runs INSIDE the microVM
+# alongside the user's worker process.
+
+supervisor-build-x86:
+	cargo build -p $(SUPERVISOR_CRATE) --target x86_64-unknown-linux-musl --release
+
+supervisor-build-aarch64:
+	cargo build -p $(SUPERVISOR_CRATE) --target aarch64-unknown-linux-musl --release
+
+supervisor-build-all: supervisor-build-x86 supervisor-build-aarch64
+
+# Install the just-built supervisor binary to ~/.iii/lib so the iii-worker
+# resolver picks it up without needing III_SUPERVISOR_PATH. Depends on the
+# arch-specific build; `sandbox` chains them in order.
+supervisor-install:
+	@mkdir -p $(SUPERVISOR_INSTALL_DIR)
+	@cp target/$(INIT_TARGET)/release/iii-supervisor $(SUPERVISOR_INSTALL_PATH)
+	@chmod +x $(SUPERVISOR_INSTALL_PATH)
+	@echo "  Installed iii-supervisor → $(SUPERVISOR_INSTALL_PATH)"
 
 # ── Sandbox (init + engine/worker with embedded assets) ──────────────────────
 # Auto-detects host arch for the correct musl init target.
@@ -105,13 +135,17 @@ else
   endif
 endif
 
-sandbox: ## Release-like local build: init + engine + worker(embed-init,embed-libkrunfw)
+sandbox: ## Release-like local build: init + supervisor + engine + worker(embed-init,embed-libkrunfw)
 	cargo build -p $(INIT_CRATE) --target $(INIT_TARGET) --release
+	cargo build -p $(SUPERVISOR_CRATE) --target $(INIT_TARGET) --release
+	$(MAKE) supervisor-install
 	cargo build --release -p iii
 	cargo build -p $(WORKER_CRATE) --target $(WORKER_TARGET) --features $(WORKER_EMBED_FEATURES) --release
 
-sandbox-debug: ## Release-like local debug: init + engine + worker(embed-init,embed-libkrunfw)
+sandbox-debug: ## Release-like local debug: init + supervisor + engine + worker(embed-init,embed-libkrunfw)
 	cargo build -p $(INIT_CRATE) --target $(INIT_TARGET) --release
+	cargo build -p $(SUPERVISOR_CRATE) --target $(INIT_TARGET) --release
+	$(MAKE) supervisor-install
 	cargo build -p iii
 	cargo build -p $(WORKER_CRATE) --target $(WORKER_TARGET) --features $(WORKER_EMBED_FEATURES)
 
