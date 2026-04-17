@@ -173,13 +173,14 @@ class III:
                 # would mean restoring a live peer's handler when WE remove
                 # ours. Walk to that peer's recorded predecessor instead so
                 # the chain unwinds to the host's original handler.
+                prev_func = getattr(previous, "__func__", None)
+                prev_self = getattr(previous, "__self__", None)
                 if (
-                    getattr(previous, "__func__", None)
-                    is getattr(self._on_shutdown_signal, "__func__", None)
-                    and getattr(previous, "__self__", None) is not self
+                    prev_func is getattr(self._on_shutdown_signal, "__func__", None)
+                    and prev_self is not None
+                    and prev_self is not self
                 ):
-                    other = previous.__self__
-                    previous = other._signal_handlers.get(signum, signal.SIG_DFL)
+                    previous = prev_self._signal_handlers.get(signum, signal.SIG_DFL)
                 self._signal_handlers[signum] = previous
             except (ValueError, OSError) as exc:
                 # ValueError: not main thread. OSError: unsupported platform.
