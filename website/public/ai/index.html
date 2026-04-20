@@ -48,26 +48,22 @@ For implementation details and source examples, visit:
 - [Skills Repository](https://github.com/iii-hq/skills)
 
 ## Overview
-### Unreasonably simple backend engineering
-iii turns distributed backend complexity into a simple set of real-time, interoperable primitives called Functions, Triggers, and Workers. The result is coordinated execution that behaves as if it were a single runtime.
+### Any service. Function. Trigger. Worker.
+iii is one protocol for anything that does work. Compose your services, agents, browsers, devices, and third-party APIs into one observable, callable system. Three primitives close the model. Any language, anywhere.
 Follow our development
 
 ## iii in a nutshell
-iii's primitives result in an execution model and system traits that make it unreasonably good at creating backend software. In iii every capability, every framework, every tool can become a pattern on the same core system.
-Execution model
-#### Durable orchestration
-Coordinate long-running, failure-tolerant execution across workers, and triggers.
-#### Interoperable execution
-Execute across languages natively as if it were one runtime.
-#### Simple primitives
-Collapse distributed backend design into a simple paradigm that humans and agents can reason about.
-Live system traits
-#### Live discovery
-Functions and triggers exposed by one worker become visible and usable across the system in real time.
-#### Live extensibility
-Add new workers and capabilities to a live iii system without redesigning the architecture.
-#### Live observability
-Observe operations, traces, and system behavior across the entire connected stack in real time.
+Three primitives close the model. One protocol connects them. Every service, agent, browser, device, and third-party API becomes callable, composable, and observable on the same graph — as if your whole system were one runtime.
+Anything callable. A unit of work with a typed input and optional output. Implemented by a worker, fronted by an HTTP endpoint, or wrapped around something that already exists.
+Anything that runs a Function. HTTP, cron, queues, streams, state changes, or custom event sources contributed by workers.
+Anything that hosts Functions or emits Triggers. A service, an agent, a browser tab, a device, a CLI, or a third-party API.
+What this unlocks
+#### Boundaries collapse
+Languages, locations, and trust boundaries stop mattering. Anything that speaks the protocol can call anything else that does.
+#### Existing things become first-class
+Wrap any HTTP endpoint, queue, agent, or device into the model. No rewrite. They show up in the same registry, the same traces, the same graph.
+#### Live, observable, discoverable
+New capabilities appear in real time without redeploys. Every call, retry, and failure flows through one observability pipeline.
 
 ## Architecture
 ### One engine.Three primitives.

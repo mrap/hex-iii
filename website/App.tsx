@@ -11,6 +11,7 @@ import { Navbar } from './components/Navbar';
 import { MachineView } from './components/MachineView';
 import { SectionsPreview } from './pages/SectionsPreview';
 import { ManifestoPage } from './pages/ManifestoPage';
+import { HomeV2 } from './pages/HomeV2';
 import { CookieConsent } from './components/CookieConsent';
 import { useCookieConsent } from './lib/useCookieConsent';
 import { KeySequence } from './types';
@@ -26,6 +27,9 @@ const AppRouter: React.FC = () => {
   }
   if (pathname === '/manifesto') {
     return <ManifestoPage />;
+  }
+  if (pathname === '/v2') {
+    return <HomeV2 />;
   }
   return <App />;
 };
