@@ -19,6 +19,9 @@ fn cli_parses_all_subcommands() {
         (&["iii-worker", "remove", "pdfkit"], |c| {
             assert!(matches!(c, Commands::Remove { .. }))
         }),
+        (&["iii-worker", "update"], |c| {
+            assert!(matches!(c, Commands::Update { .. }))
+        }),
         (&["iii-worker", "start", "pdfkit"], |c| {
             assert!(matches!(c, Commands::Start { .. }))
         }),
@@ -27,6 +30,12 @@ fn cli_parses_all_subcommands() {
         }),
         (&["iii-worker", "list"], |c| {
             assert!(matches!(c, Commands::List))
+        }),
+        (&["iii-worker", "sync"], |c| {
+            assert!(matches!(c, Commands::Sync { .. }))
+        }),
+        (&["iii-worker", "verify"], |c| {
+            assert!(matches!(c, Commands::Verify))
         }),
         (&["iii-worker", "logs", "my-worker"], |c| {
             assert!(matches!(c, Commands::Logs { .. }))
@@ -164,6 +173,24 @@ fn add_subcommand_multiple_workers() {
             assert!(!force);
         }
         _ => panic!("Expected Add command"),
+    }
+}
+
+#[test]
+fn sync_subcommand_accepts_frozen_flag() {
+    let cli = Cli::parse_from(["iii-worker", "sync", "--frozen"]);
+    match cli.command {
+        Commands::Sync { frozen } => assert!(frozen),
+        _ => panic!("expected Sync"),
+    }
+}
+
+#[test]
+fn update_subcommand_accepts_optional_worker() {
+    let cli = Cli::parse_from(["iii-worker", "update", "pdfkit"]);
+    match cli.command {
+        Commands::Update { worker_name } => assert_eq!(worker_name.as_deref(), Some("pdfkit")),
+        _ => panic!("expected Update"),
     }
 }
 

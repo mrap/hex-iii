@@ -30,7 +30,8 @@ use super::builtin_defaults::get_builtin_default;
 use super::config_file::ResolvedWorkerType;
 use super::lifecycle::build_container_spec;
 use super::registry::{
-    BinaryWorkerResponse, MANIFEST_PATH, WorkerInfoResponse, fetch_worker_info, parse_worker_input,
+    BinaryWorkerResponse, MANIFEST_PATH, ResolvedWorkerGraph, WorkerInfoResponse,
+    fetch_resolved_worker_graph, fetch_worker_info, parse_worker_input,
 };
 use super::worker_manager::state::WorkerDef;
 
@@ -104,11 +105,7 @@ pub async fn handle_binary_add(
         }
     }
 
-    let config_yaml = response
-        .config
-        .config
-        .as_object()
-        .map(|_| serde_yaml::to_string(&response.config.config).unwrap_or_default());
+    let config_yaml = binary_config_yaml(&response.config);
 
     if let Err(e) = super::config_file::append_worker(worker_name, config_yaml.as_deref()) {
         eprintln!("{} {}", "error:".red(), e);
@@ -129,6 +126,33 @@ pub async fn handle_binary_add(
         // reload automatically — no need to start the worker here.
     }
     0
+}
+
+fn binary_config_yaml(config: &serde_json::Value) -> Option<String> {
+    let config = match config {
+        serde_json::Value::Null => return None,
+        serde_json::Value::Object(map) if map.is_empty() => return None,
+        serde_json::Value::Object(map) => map.get("config").unwrap_or(config),
+        _ => config,
+    };
+
+    match config {
+        serde_json::Value::Null => None,
+        serde_json::Value::Object(map) if map.is_empty() => None,
+        _ => {
+            let yaml = serde_yaml::to_string(config).unwrap_or_default();
+            let yaml = yaml
+                .strip_prefix("---\n")
+                .unwrap_or(&yaml)
+                .trim_end()
+                .to_string();
+            if yaml.is_empty() || yaml == "{}" || yaml == "null" {
+                None
+            } else {
+                Some(yaml)
+            }
+        }
+    }
 }
 
 pub async fn handle_managed_add_many(worker_names: &[String], wait: bool) -> i32 {
@@ -159,6 +183,256 @@ pub async fn handle_managed_add_many(worker_names: &[String], wait: bool) -> i32
     }
 
     if fail_count == 0 { 0 } else { 1 }
+}
+
+pub async fn handle_worker_sync(frozen: bool) -> i32 {
+    if frozen {
+        return handle_worker_verify().await;
+    }
+
+    let lock_path = super::lockfile::lockfile_path();
+    let lockfile = match super::lockfile::WorkerLockfile::read_from(lock_path) {
+        Ok(lockfile) => lockfile,
+        Err(e) => {
+            eprintln!("{} {}", "error:".red(), e);
+            return 1;
+        }
+    };
+
+    eprintln!(
+        "  {} {} worker(s) pinned in {}",
+        "✓".green(),
+        lockfile.workers.len(),
+        "iii.lock".dimmed(),
+    );
+    eprintln!("  Run `iii worker verify` in CI to check config.yaml against the lockfile.");
+    0
+}
+
+pub async fn handle_worker_verify() -> i32 {
+    let lock_path = super::lockfile::lockfile_path();
+    let lockfile = match super::lockfile::WorkerLockfile::read_from(lock_path) {
+        Ok(lockfile) => lockfile,
+        Err(e) => {
+            eprintln!("{} {}", "error:".red(), e);
+            return 1;
+        }
+    };
+
+    let names = super::config_file::list_worker_names();
+    match lockfile.verify_config_workers(&names) {
+        Ok(()) => {
+            eprintln!("  {} config.yaml matches iii.lock", "✓".green());
+            0
+        }
+        Err(e) => {
+            eprintln!("{} {}", "error:".red(), e);
+            1
+        }
+    }
+}
+
+pub async fn handle_worker_update(worker_name: Option<&str>) -> i32 {
+    if let Some(name) = worker_name
+        && let Err(e) = super::registry::validate_worker_name(name)
+    {
+        eprintln!("{} {}", "error:".red(), e);
+        return 1;
+    }
+
+    let lock_path = super::lockfile::lockfile_path();
+    let lockfile = match super::lockfile::WorkerLockfile::read_from(lock_path) {
+        Ok(lockfile) => lockfile,
+        Err(e) => {
+            eprintln!("{} {}", "error:".red(), e);
+            return 1;
+        }
+    };
+
+    let names: Vec<String> = match worker_name {
+        Some(name) => {
+            if !lockfile.workers.contains_key(name) {
+                eprintln!("{} Worker '{}' is not in iii.lock", "error:".red(), name);
+                return 1;
+            }
+            vec![name.to_string()]
+        }
+        None => lockfile.workers.keys().cloned().collect(),
+    };
+
+    let mut fail_count = 0;
+    for name in &names {
+        let graph = match fetch_resolved_worker_graph(
+            name,
+            Some("latest"),
+            Some(binary_download::current_target()),
+        )
+        .await
+        {
+            Ok(graph) => graph,
+            Err(e) => {
+                eprintln!("{} {}", "error:".red(), e);
+                fail_count += 1;
+                continue;
+            }
+        };
+
+        let rc = handle_resolved_graph_add(&graph, false).await;
+        if rc != 0 {
+            fail_count += 1;
+        }
+    }
+
+    if fail_count == 0 { 0 } else { 1 }
+}
+
+fn lockfile_from_graph(
+    graph: &ResolvedWorkerGraph,
+    target: &str,
+) -> Result<super::lockfile::WorkerLockfile, String> {
+    let mut lock = super::lockfile::WorkerLockfile::default();
+
+    for node in &graph.graph {
+        let source = match node.worker_type.as_str() {
+            "binary" => {
+                let binaries = node.binaries.as_ref().ok_or_else(|| {
+                    format!("resolved binary worker '{}' has no binaries", node.name)
+                })?;
+                let binary = binaries.get(target).ok_or_else(|| {
+                    format!(
+                        "resolved binary worker '{}' has no artifact for {}",
+                        node.name, target
+                    )
+                })?;
+                super::lockfile::LockedSource::Binary {
+                    target: target.to_string(),
+                    url: binary.url.clone(),
+                    sha256: binary.sha256.clone(),
+                }
+            }
+            "image" => super::lockfile::LockedSource::Image {
+                image: node
+                    .image
+                    .clone()
+                    .ok_or_else(|| format!("resolved image worker '{}' has no image", node.name))?,
+            },
+            other => {
+                return Err(format!(
+                    "resolved worker '{}' has unsupported type '{}'",
+                    node.name, other
+                ));
+            }
+        };
+
+        lock.workers.insert(
+            node.name.clone(),
+            super::lockfile::LockedWorker {
+                version: node.version.clone(),
+                worker_type: if node.worker_type == "image" {
+                    super::lockfile::LockedWorkerType::Image
+                } else {
+                    super::lockfile::LockedWorkerType::Binary
+                },
+                dependencies: node.dependencies.clone().into_iter().collect(),
+                source,
+            },
+        );
+    }
+
+    Ok(lock)
+}
+
+fn print_resolved_tree(graph: &ResolvedWorkerGraph) {
+    eprintln!("\n  Resolved worker graph");
+    for node in &graph.graph {
+        if node.name == graph.root.name {
+            eprintln!("  {}@{}", node.name.bold(), node.version);
+            for edge in graph.edges.iter().filter(|edge| edge.from == node.name) {
+                let resolved = graph
+                    .graph
+                    .iter()
+                    .find(|node| node.name == edge.to)
+                    .map(|node| node.version.as_str())
+                    .unwrap_or(edge.range.as_str());
+                eprintln!(
+                    "  └─ {} ({})",
+                    format!("{}@{}", edge.to, resolved).dimmed(),
+                    edge.range
+                );
+            }
+        }
+    }
+}
+
+async fn handle_resolved_graph_add(graph: &ResolvedWorkerGraph, brief: bool) -> i32 {
+    let target = graph
+        .target
+        .clone()
+        .unwrap_or_else(|| binary_download::current_target().to_string());
+
+    for node in &graph.graph {
+        let rc = match node.worker_type.as_str() {
+            "binary" => {
+                let response = BinaryWorkerResponse {
+                    name: node.name.clone(),
+                    version: node.version.clone(),
+                    binaries: node.binaries.clone().unwrap_or_default(),
+                    config: node.config.clone(),
+                };
+                handle_binary_add(&node.name, &response, brief).await
+            }
+            "image" => {
+                let Some(image) = node.image.as_deref() else {
+                    eprintln!(
+                        "{} Resolved image worker '{}' has no image",
+                        "error:".red(),
+                        node.name
+                    );
+                    return 1;
+                };
+                handle_oci_pull_and_add(&node.name, image, brief).await
+            }
+            other => {
+                eprintln!(
+                    "{} Resolved worker '{}' has unsupported type '{}'",
+                    "error:".red(),
+                    node.name,
+                    other
+                );
+                return 1;
+            }
+        };
+
+        if rc != 0 {
+            return rc;
+        }
+    }
+
+    let graph_lockfile = match lockfile_from_graph(graph, &target) {
+        Ok(lockfile) => lockfile,
+        Err(e) => {
+            eprintln!("{} {}", "error:".red(), e);
+            return 1;
+        }
+    };
+
+    let mut lockfile = super::lockfile::WorkerLockfile::read_from(super::lockfile::lockfile_path())
+        .unwrap_or_default();
+    for (name, worker) in graph_lockfile.workers {
+        lockfile.workers.insert(name, worker);
+    }
+
+    if let Err(e) = lockfile.write_to(super::lockfile::lockfile_path()) {
+        eprintln!("{} {}", "error:".red(), e);
+        return 1;
+    }
+
+    if !brief {
+        print_resolved_tree(graph);
+        eprintln!("  {} Wrote {}", "✓".green(), "iii.lock".dimmed());
+    }
+
+    0
 }
 
 pub async fn handle_managed_add(
@@ -308,6 +582,26 @@ pub async fn handle_managed_add(
 
     if !brief {
         eprintln!("  Resolving {}...", name.bold());
+    }
+
+    match fetch_resolved_worker_graph(
+        &name,
+        version.as_deref(),
+        Some(binary_download::current_target()),
+    )
+    .await
+    {
+        Ok(graph) => {
+            let rc = handle_resolved_graph_add(&graph, brief).await;
+            return finish_add(&name, rc, wait, brief).await;
+        }
+        Err(e) if e.starts_with("Failed to parse worker graph:") => {
+            tracing::debug!("falling back to single-worker registry response: {}", e);
+        }
+        Err(e) => {
+            eprintln!("{} {}", "error:".red(), e);
+            return 1;
+        }
     }
 
     let response = match fetch_worker_info(&name, version.as_deref()).await {
@@ -2131,6 +2425,41 @@ mod tests {
         std::env::set_current_dir(&dir_path).unwrap();
         let _cwd_guard = CwdGuard(original);
         f(dir_path).await;
+    }
+
+    #[test]
+    fn binary_config_yaml_omits_empty_registry_config() {
+        assert_eq!(binary_config_yaml(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn binary_config_yaml_extracts_wrapped_registry_config() {
+        let config = serde_json::json!({
+            "name": "image-resize",
+            "config": {
+                "width": 200,
+                "strategy": "scale-to-fit"
+            }
+        });
+
+        let yaml = binary_config_yaml(&config).expect("wrapped config should render");
+
+        assert!(yaml.contains("width: 200"));
+        assert!(yaml.contains("strategy: scale-to-fit"));
+        assert!(!yaml.contains("name: image-resize"));
+    }
+
+    #[test]
+    fn binary_config_yaml_accepts_plain_registry_config() {
+        let config = serde_json::json!({
+            "width": 200,
+            "strategy": "scale-to-fit"
+        });
+
+        let yaml = binary_config_yaml(&config).expect("plain config should render");
+
+        assert!(yaml.contains("width: 200"));
+        assert!(yaml.contains("strategy: scale-to-fit"));
     }
 
     #[tokio::test]
