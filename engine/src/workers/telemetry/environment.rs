@@ -5,8 +5,6 @@
 // See LICENSE and PATENTS files for details.
 
 use machineid_rs::{Encryption, HWIDComponent, IdBuilder};
-use sha2::{Digest, Sha256};
-
 const TELEMETRY_SCHEMA_VERSION: u8 = 2;
 const DEVICE_ID_SALT: &str = "iii-machine-id";
 const EXECUTION_CONTEXT_ENV: &str = "III_EXECUTION_CONTEXT";
@@ -168,13 +166,6 @@ fn write_device_id_to_project_ini(device_id: &str) {
     write_atomic(&path, &new_contents);
 }
 
-fn salted_sha256(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input);
-    hasher.update(DEVICE_ID_SALT);
-    format!("{:x}", hasher.finalize())
-}
-
 pub fn find_host_device_id() -> Option<String> {
     std::env::var("III_HOST_DEVICE_ID")
         .ok()
@@ -184,21 +175,36 @@ pub fn find_host_device_id() -> Option<String> {
 
 const UNKNOWN_CONTAINER_DEVICE_ID: &str = "unknown-container";
 const UNKNOWN_HOST_DEVICE_ID: &str = "unknown-host";
+const UNKNOWN_HOSTNAME: &str = "unknown-hostname";
 
-fn container_device_id_for(host_device_id: Option<String>) -> String {
-    // Hash the host device_id (from III_HOST_DEVICE_ID or a mounted
-    // .iii/project.ini) so every container launched from the same host
-    // collapses into a single Amplitude device. The `container-` prefix
-    // lets queries split host-origin ids from container-origin ones.
+fn detect_container_hostname() -> Option<String> {
+    hostname::get()
+        .ok()
+        .and_then(|s| s.into_string().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn container_device_id_for(
+    host_device_id: Option<String>,
+    container_hostname: Option<String>,
+) -> String {
+    // Format: `container-{host_id}-{hostname}`. The host_id piece is already a
+    // salted SHA256 (either from machineid-rs on the host or pasted through
+    // III_HOST_DEVICE_ID), so it's embedded verbatim — no re-hashing. The
+    // hostname piece lets us distinguish individual container instances on the
+    // same host in Amplitude.
     //
-    // When no host identity is available we intentionally collapse all
-    // such containers onto a single `unknown-container` device rather
-    // than minting a fresh UUID per boot, so Amplitude doesn't see a
-    // flood of one-off devices that churn on every restart.
-    match host_device_id {
-        Some(base) => format!("container-{}", salted_sha256(&base)),
-        None => UNKNOWN_CONTAINER_DEVICE_ID.to_string(),
-    }
+    // When no host identity is available we collapse all such containers onto
+    // a single `unknown-container` device regardless of hostname — that
+    // sentinel signals a misconfigured deployment and we don't want it to
+    // fan out into many devices. When the hostname is unavailable but the
+    // host_id is, we still emit a well-formed id using `unknown-hostname`.
+    let Some(host_id) = host_device_id else {
+        return UNKNOWN_CONTAINER_DEVICE_ID.to_string();
+    };
+    let hostname = container_hostname.unwrap_or_else(|| UNKNOWN_HOSTNAME.to_string());
+    format!("container-{host_id}-{hostname}")
 }
 
 fn host_device_id_for(machine_id: Option<String>) -> String {
@@ -209,7 +215,7 @@ fn host_device_id_for(machine_id: Option<String>) -> String {
 }
 
 fn generate_container_device_id() -> String {
-    container_device_id_for(find_host_device_id())
+    container_device_id_for(find_host_device_id(), detect_container_hostname())
 }
 
 fn generate_new_device_id() -> String {
@@ -1032,15 +1038,31 @@ state:
     }
 
     #[test]
-    fn test_container_device_id_for_hashes_host_when_present() {
-        let id = container_device_id_for(Some("host-abc".to_string()));
-        assert!(id.starts_with("container-"), "got {id}");
-        assert!(id.len() > "container-".len());
+    fn test_container_device_id_for_host_and_hostname() {
+        assert_eq!(
+            container_device_id_for(Some("host-abc".to_string()), Some("box-1".to_string())),
+            "container-host-abc-box-1"
+        );
     }
 
     #[test]
-    fn test_container_device_id_for_returns_unknown_container_when_missing() {
-        assert_eq!(container_device_id_for(None), "unknown-container");
+    fn test_container_device_id_for_missing_hostname_uses_unknown_hostname_suffix() {
+        assert_eq!(
+            container_device_id_for(Some("host-abc".to_string()), None),
+            "container-host-abc-unknown-hostname"
+        );
+    }
+
+    #[test]
+    fn test_container_device_id_for_missing_host_is_unknown_container_regardless_of_hostname() {
+        assert_eq!(
+            container_device_id_for(None, None),
+            "unknown-container"
+        );
+        assert_eq!(
+            container_device_id_for(None, Some("box-1".to_string())),
+            "unknown-container"
+        );
     }
 
     #[test]
@@ -1068,7 +1090,10 @@ state:
             env::remove_var("III_HOST_DEVICE_ID");
         }
         let id = generate_container_device_id();
-        assert!(id.starts_with("container-"));
+        assert!(
+            id.starts_with("container-host-dev-abc-"),
+            "expected host id literal in prefix, got {id}"
+        );
         unsafe {
             env::remove_var("III_PROJECT_ROOT");
         }
@@ -1082,8 +1107,8 @@ state:
             env::set_var("III_PROJECT_ROOT", dir.path());
             env::set_var("III_HOST_DEVICE_ID", "host-dev-xyz");
         }
-        // Same III_HOST_DEVICE_ID → same container device_id across calls.
-        // All containers on one host collapse to a single Amplitude device.
+        // Same III_HOST_DEVICE_ID + same hostname (hostname doesn't change
+        // within one process) → same container device_id across calls.
         let a = generate_container_device_id();
         let b = generate_container_device_id();
         assert_eq!(a, b, "same host_device_id must yield same container id");
@@ -1110,7 +1135,10 @@ state:
             env::set_var("III_HOST_DEVICE_ID", "host-dev-env");
         }
         let id = generate_container_device_id();
-        assert!(id.starts_with("container-"));
+        assert!(
+            id.starts_with("container-host-dev-env-"),
+            "expected host id literal in prefix, got {id}"
+        );
         unsafe {
             env::remove_var("III_PROJECT_ROOT");
             env::remove_var("III_HOST_DEVICE_ID");
