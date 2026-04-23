@@ -10,7 +10,7 @@ pub mod environment;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -273,123 +273,292 @@ fn build_base_properties(snap: &EngineSnapshot) -> serde_json::Map<String, serde
     m
 }
 
-// TODO: Re-enable delta metrics reporting once more important dashboards are ready.
-//
-// struct DeltaAccumulator {
-//     invocations_total: u64,
-//     invocations_success: u64,
-//     invocations_error: u64,
-//     api_requests: u64,
-//     queue_emits: u64,
-//     queue_consumes: u64,
-//     pubsub_publishes: u64,
-//     pubsub_subscribes: u64,
-//     cron_executions: u64,
-// }
-//
-// impl DeltaAccumulator {
-//     fn new() -> Self {
-//         Self {
-//             invocations_total: 0,
-//             invocations_success: 0,
-//             invocations_error: 0,
-//             api_requests: 0,
-//             queue_emits: 0,
-//             queue_consumes: 0,
-//             pubsub_publishes: 0,
-//             pubsub_subscribes: 0,
-//             cron_executions: 0,
-//         }
-//     }
-//
-//     fn snapshot(&mut self) -> DeltaSnapshot {
-//         use std::sync::atomic::Ordering;
-//         let acc = crate::workers::observability::metrics::get_metrics_accumulator();
-//         let col = collector();
-//
-//         let cur = DeltaAccumulator {
-//             invocations_total: acc.invocations_total.load(Ordering::Relaxed),
-//             invocations_success: acc.invocations_success.load(Ordering::Relaxed),
-//             invocations_error: acc.invocations_error.load(Ordering::Relaxed),
-//             api_requests: col.api_requests.load(Ordering::Relaxed),
-//             queue_emits: col.queue_emits.load(Ordering::Relaxed),
-//             queue_consumes: col.queue_consumes.load(Ordering::Relaxed),
-//             pubsub_publishes: col.pubsub_publishes.load(Ordering::Relaxed),
-//             pubsub_subscribes: col.pubsub_subscribes.load(Ordering::Relaxed),
-//             cron_executions: col.cron_executions.load(Ordering::Relaxed),
-//         };
-//
-//         let deltas = DeltaSnapshot {
-//             invocations_total: cur.invocations_total.saturating_sub(self.invocations_total),
-//             invocations_success: cur
-//                 .invocations_success
-//                 .saturating_sub(self.invocations_success),
-//             invocations_error: cur.invocations_error.saturating_sub(self.invocations_error),
-//             api_requests: cur.api_requests.saturating_sub(self.api_requests),
-//             queue_emits: cur.queue_emits.saturating_sub(self.queue_emits),
-//             queue_consumes: cur.queue_consumes.saturating_sub(self.queue_consumes),
-//             pubsub_publishes: cur.pubsub_publishes.saturating_sub(self.pubsub_publishes),
-//             pubsub_subscribes: cur.pubsub_subscribes.saturating_sub(self.pubsub_subscribes),
-//             cron_executions: cur.cron_executions.saturating_sub(self.cron_executions),
-//         };
-//
-//         *self = cur;
-//         deltas
-//     }
-// }
-//
-// struct DeltaSnapshot {
-//     invocations_total: u64,
-//     invocations_success: u64,
-//     invocations_error: u64,
-//     api_requests: u64,
-//     queue_emits: u64,
-//     queue_consumes: u64,
-//     pubsub_publishes: u64,
-//     pubsub_subscribes: u64,
-//     cron_executions: u64,
-// }
-//
-// impl DeltaSnapshot {
-//     fn insert_into(&self, m: &mut serde_json::Map<String, serde_json::Value>) {
-//         m.insert(
-//             "delta_invocations_total".into(),
-//             serde_json::json!(self.invocations_total),
-//         );
-//         m.insert(
-//             "delta_invocations_success".into(),
-//             serde_json::json!(self.invocations_success),
-//         );
-//         m.insert(
-//             "delta_invocations_error".into(),
-//             serde_json::json!(self.invocations_error),
-//         );
-//         m.insert(
-//             "delta_api_requests".into(),
-//             serde_json::json!(self.api_requests),
-//         );
-//         m.insert(
-//             "delta_queue_emits".into(),
-//             serde_json::json!(self.queue_emits),
-//         );
-//         m.insert(
-//             "delta_queue_consumes".into(),
-//             serde_json::json!(self.queue_consumes),
-//         );
-//         m.insert(
-//             "delta_pubsub_publishes".into(),
-//             serde_json::json!(self.pubsub_publishes),
-//         );
-//         m.insert(
-//             "delta_pubsub_subscribes".into(),
-//             serde_json::json!(self.pubsub_subscribes),
-//         );
-//         m.insert(
-//             "delta_cron_executions".into(),
-//             serde_json::json!(self.cron_executions),
-//         );
-//     }
-// }
+/// Holds the previous snapshot of cumulative counters and current-state values so
+/// each heartbeat can emit deltas. The state fields (function/trigger/worker counts
+/// and ID sets) can decrease, so we track them explicitly instead of only relying on
+/// the monotonically-increasing registration counters.
+struct DeltaAccumulator {
+    initialized: bool,
+
+    // Cumulative counters from the metrics accumulator / collector. Only grow.
+    invocations_total: u64,
+    invocations_success: u64,
+    invocations_error: u64,
+    api_requests: u64,
+    queue_emits: u64,
+    queue_consumes: u64,
+    pubsub_publishes: u64,
+    pubsub_subscribes: u64,
+    cron_executions: u64,
+    function_registrations: u64,
+    trigger_registrations: u64,
+
+    // Current-state values. Can go up or down between heartbeats.
+    function_count: usize,
+    trigger_count: usize,
+    worker_count: usize,
+    function_ids: HashSet<String>,
+    worker_ids: HashSet<String>,
+}
+
+impl DeltaAccumulator {
+    fn new() -> Self {
+        Self {
+            initialized: false,
+            invocations_total: 0,
+            invocations_success: 0,
+            invocations_error: 0,
+            api_requests: 0,
+            queue_emits: 0,
+            queue_consumes: 0,
+            pubsub_publishes: 0,
+            pubsub_subscribes: 0,
+            cron_executions: 0,
+            function_registrations: 0,
+            trigger_registrations: 0,
+            function_count: 0,
+            trigger_count: 0,
+            worker_count: 0,
+            function_ids: HashSet::new(),
+            worker_ids: HashSet::new(),
+        }
+    }
+
+    fn snapshot(&mut self, snap: &EngineSnapshot) -> DeltaSnapshot {
+        use std::sync::atomic::Ordering;
+        let acc = crate::workers::observability::metrics::get_metrics_accumulator();
+        let col = collector::collector();
+
+        let cur_invocations_total = acc.invocations_total.load(Ordering::Relaxed);
+        let cur_invocations_success = acc.invocations_success.load(Ordering::Relaxed);
+        let cur_invocations_error = acc.invocations_error.load(Ordering::Relaxed);
+        let cur_api_requests = col.api_requests.load(Ordering::Relaxed);
+        let cur_queue_emits = col.queue_emits.load(Ordering::Relaxed);
+        let cur_queue_consumes = col.queue_consumes.load(Ordering::Relaxed);
+        let cur_pubsub_publishes = col.pubsub_publishes.load(Ordering::Relaxed);
+        let cur_pubsub_subscribes = col.pubsub_subscribes.load(Ordering::Relaxed);
+        let cur_cron_executions = col.cron_executions.load(Ordering::Relaxed);
+        let cur_function_registrations = col.function_registrations.load(Ordering::Relaxed);
+        let cur_trigger_registrations = col.trigger_registrations.load(Ordering::Relaxed);
+
+        let cur_function_count = snap.ft.function_count;
+        let cur_trigger_count = snap.ft.trigger_count;
+        let cur_worker_count = snap.wd.worker_count_total;
+        let cur_function_ids: HashSet<String> = snap.ft.functions.iter().cloned().collect();
+        let cur_worker_ids: HashSet<String> = snap.wd.workers.iter().cloned().collect();
+
+        // On the very first snapshot there is no prior state to diff against. Emit
+        // cumulative deltas (the counters reflect activity since process start) but
+        // keep the state-change deltas at zero so session start does not masquerade
+        // as a development event in Amplitude cohorts.
+        let delta = if !self.initialized {
+            DeltaSnapshot {
+                invocations_total: cur_invocations_total,
+                invocations_success: cur_invocations_success,
+                invocations_error: cur_invocations_error,
+                api_requests: cur_api_requests,
+                queue_emits: cur_queue_emits,
+                queue_consumes: cur_queue_consumes,
+                pubsub_publishes: cur_pubsub_publishes,
+                pubsub_subscribes: cur_pubsub_subscribes,
+                cron_executions: cur_cron_executions,
+                function_registrations: cur_function_registrations,
+                trigger_registrations: cur_trigger_registrations,
+                delta_function_count: 0,
+                delta_trigger_count: 0,
+                delta_worker_count: 0,
+                functions_added: Vec::new(),
+                functions_removed: Vec::new(),
+                workers_added: Vec::new(),
+                workers_removed: Vec::new(),
+            }
+        } else {
+            let functions_added: Vec<String> = cur_function_ids
+                .difference(&self.function_ids)
+                .cloned()
+                .collect();
+            let functions_removed: Vec<String> = self
+                .function_ids
+                .difference(&cur_function_ids)
+                .cloned()
+                .collect();
+            let workers_added: Vec<String> = cur_worker_ids
+                .difference(&self.worker_ids)
+                .cloned()
+                .collect();
+            let workers_removed: Vec<String> = self
+                .worker_ids
+                .difference(&cur_worker_ids)
+                .cloned()
+                .collect();
+
+            DeltaSnapshot {
+                invocations_total: cur_invocations_total.saturating_sub(self.invocations_total),
+                invocations_success: cur_invocations_success
+                    .saturating_sub(self.invocations_success),
+                invocations_error: cur_invocations_error.saturating_sub(self.invocations_error),
+                api_requests: cur_api_requests.saturating_sub(self.api_requests),
+                queue_emits: cur_queue_emits.saturating_sub(self.queue_emits),
+                queue_consumes: cur_queue_consumes.saturating_sub(self.queue_consumes),
+                pubsub_publishes: cur_pubsub_publishes.saturating_sub(self.pubsub_publishes),
+                pubsub_subscribes: cur_pubsub_subscribes.saturating_sub(self.pubsub_subscribes),
+                cron_executions: cur_cron_executions.saturating_sub(self.cron_executions),
+                function_registrations: cur_function_registrations
+                    .saturating_sub(self.function_registrations),
+                trigger_registrations: cur_trigger_registrations
+                    .saturating_sub(self.trigger_registrations),
+                delta_function_count: (cur_function_count as i64) - (self.function_count as i64),
+                delta_trigger_count: (cur_trigger_count as i64) - (self.trigger_count as i64),
+                delta_worker_count: (cur_worker_count as i64) - (self.worker_count as i64),
+                functions_added,
+                functions_removed,
+                workers_added,
+                workers_removed,
+            }
+        };
+
+        self.invocations_total = cur_invocations_total;
+        self.invocations_success = cur_invocations_success;
+        self.invocations_error = cur_invocations_error;
+        self.api_requests = cur_api_requests;
+        self.queue_emits = cur_queue_emits;
+        self.queue_consumes = cur_queue_consumes;
+        self.pubsub_publishes = cur_pubsub_publishes;
+        self.pubsub_subscribes = cur_pubsub_subscribes;
+        self.cron_executions = cur_cron_executions;
+        self.function_registrations = cur_function_registrations;
+        self.trigger_registrations = cur_trigger_registrations;
+        self.function_count = cur_function_count;
+        self.trigger_count = cur_trigger_count;
+        self.worker_count = cur_worker_count;
+        self.function_ids = cur_function_ids;
+        self.worker_ids = cur_worker_ids;
+        self.initialized = true;
+
+        delta
+    }
+}
+
+struct DeltaSnapshot {
+    invocations_total: u64,
+    invocations_success: u64,
+    invocations_error: u64,
+    api_requests: u64,
+    queue_emits: u64,
+    queue_consumes: u64,
+    pubsub_publishes: u64,
+    pubsub_subscribes: u64,
+    cron_executions: u64,
+    function_registrations: u64,
+    trigger_registrations: u64,
+    delta_function_count: i64,
+    delta_trigger_count: i64,
+    delta_worker_count: i64,
+    functions_added: Vec<String>,
+    functions_removed: Vec<String>,
+    workers_added: Vec<String>,
+    workers_removed: Vec<String>,
+}
+
+impl DeltaSnapshot {
+    /// `is_active` captures runtime activity in the period (any invocations).
+    /// Use this to separate idle installs from workloads actually serving traffic.
+    fn is_active(&self) -> bool {
+        self.invocations_total > 0
+    }
+
+    /// `is_active_developer` captures development activity in the period: the
+    /// registered function set changed (add/remove) or a function was
+    /// re-registered (hot reload / code edit cycle). Intentionally excludes
+    /// pure worker churn so SDK reconnects without code changes don't flip it.
+    fn is_active_developer(&self) -> bool {
+        !self.functions_added.is_empty()
+            || !self.functions_removed.is_empty()
+            || self.function_registrations > 0
+            || self.delta_function_count != 0
+            || self.delta_trigger_count != 0
+    }
+
+    fn insert_into(&self, m: &mut serde_json::Map<String, serde_json::Value>) {
+        m.insert(
+            "delta_invocations_total".into(),
+            serde_json::json!(self.invocations_total),
+        );
+        m.insert(
+            "delta_invocations_success".into(),
+            serde_json::json!(self.invocations_success),
+        );
+        m.insert(
+            "delta_invocations_error".into(),
+            serde_json::json!(self.invocations_error),
+        );
+        m.insert(
+            "delta_api_requests".into(),
+            serde_json::json!(self.api_requests),
+        );
+        m.insert(
+            "delta_queue_emits".into(),
+            serde_json::json!(self.queue_emits),
+        );
+        m.insert(
+            "delta_queue_consumes".into(),
+            serde_json::json!(self.queue_consumes),
+        );
+        m.insert(
+            "delta_pubsub_publishes".into(),
+            serde_json::json!(self.pubsub_publishes),
+        );
+        m.insert(
+            "delta_pubsub_subscribes".into(),
+            serde_json::json!(self.pubsub_subscribes),
+        );
+        m.insert(
+            "delta_cron_executions".into(),
+            serde_json::json!(self.cron_executions),
+        );
+        m.insert(
+            "delta_function_registrations".into(),
+            serde_json::json!(self.function_registrations),
+        );
+        m.insert(
+            "delta_trigger_registrations".into(),
+            serde_json::json!(self.trigger_registrations),
+        );
+        m.insert(
+            "delta_function_count".into(),
+            serde_json::json!(self.delta_function_count),
+        );
+        m.insert(
+            "delta_trigger_count".into(),
+            serde_json::json!(self.delta_trigger_count),
+        );
+        m.insert(
+            "delta_worker_count".into(),
+            serde_json::json!(self.delta_worker_count),
+        );
+        m.insert(
+            "functions_added".into(),
+            serde_json::json!(self.functions_added),
+        );
+        m.insert(
+            "functions_removed".into(),
+            serde_json::json!(self.functions_removed),
+        );
+        m.insert(
+            "workers_added".into(),
+            serde_json::json!(self.workers_added),
+        );
+        m.insert(
+            "workers_removed".into(),
+            serde_json::json!(self.workers_removed),
+        );
+        m.insert("is_active".into(), serde_json::json!(self.is_active()));
+        m.insert(
+            "is_active_developer".into(),
+            serde_json::json!(self.is_active_developer()),
+        );
+    }
+}
 
 fn collect_functions_and_triggers(engine: &Engine) -> FunctionTriggerData {
     let functions: Vec<String> = engine
@@ -599,6 +768,7 @@ pub struct TelemetryWorker {
     sdk_client: Option<Arc<AmplitudeClient>>,
     ctx: TelemetryContext,
     start_time: Instant,
+    delta: Arc<Mutex<DeltaAccumulator>>,
 }
 
 impl TelemetryWorker {
@@ -694,6 +864,7 @@ impl Worker for TelemetryWorker {
             sdk_client,
             ctx,
             start_time: Instant::now(),
+            delta: Arc::new(Mutex::new(DeltaAccumulator::new())),
         }))
     }
 
@@ -711,10 +882,12 @@ impl Worker for TelemetryWorker {
         let engine = Arc::clone(&self.engine);
         let ctx = self.ctx.clone();
         let start_time = self.start_time;
+        let delta = Arc::clone(&self.delta);
 
         let engine_for_started = Arc::clone(&self.engine);
         let client_for_started = Arc::clone(self.active_client());
         let ctx_for_started = self.ctx.clone();
+        let delta_for_started = Arc::clone(&self.delta);
         tokio::spawn(async move {
             let user_invocation = collector::first_user_invocation_notify().notified();
             tokio::select! {
@@ -749,10 +922,12 @@ impl Worker for TelemetryWorker {
                 "uptime_secs".into(),
                 serde_json::json!(start_time.elapsed().as_secs()),
             );
-            // TODO: Re-enable delta metrics once more important dashboards are ready.
-            // let d = DeltaAccumulator::new().snapshot();
-            // props.insert("is_active".into(), serde_json::json!(d.invocations_total > 0));
-            // d.insert_into(&mut props);
+
+            let d = delta_for_started
+                .lock()
+                .expect("delta accumulator mutex poisoned")
+                .snapshot(&snap);
+            d.insert_into(&mut props);
 
             let boot_heartbeat = ctx_for_started.build_event(
                 "heartbeat",
@@ -768,9 +943,6 @@ impl Worker for TelemetryWorker {
 
             interval.tick().await;
 
-            // TODO: Re-enable delta metrics once downstream dashboards are ready.
-            // let mut deltas = DeltaAccumulator::new();
-
             loop {
                 tokio::select! {
                     result = shutdown_rx.changed() => {
@@ -780,6 +952,12 @@ impl Worker for TelemetryWorker {
 
                             let mut props = build_base_properties(&snap);
                             props.insert("uptime_secs".into(), serde_json::json!(start_time.elapsed().as_secs()));
+
+                            let d = delta
+                                .lock()
+                                .expect("delta accumulator mutex poisoned")
+                                .snapshot(&snap);
+                            d.insert_into(&mut props);
 
                             let event = ctx.build_event(
                                 "engine_stopped",
@@ -797,7 +975,6 @@ impl Worker for TelemetryWorker {
                         }
                     }
                     _ = interval.tick() => {
-                        // let d = deltas.snapshot();
                         let snap = collect_engine_snapshot(&engine);
 
                         let mut props = build_base_properties(&snap);
@@ -805,8 +982,12 @@ impl Worker for TelemetryWorker {
                         props.insert("worker_count_by_language".into(), serde_json::json!(snap.wd.worker_count_by_language));
                         props.insert("period_secs".into(), serde_json::json!(interval_secs));
                         props.insert("uptime_secs".into(), serde_json::json!(start_time.elapsed().as_secs()));
-                        // props.insert("is_active".into(), serde_json::json!(d.invocations_total > 0));
-                        // d.insert_into(&mut props);
+
+                        let d = delta
+                            .lock()
+                            .expect("delta accumulator mutex poisoned")
+                            .snapshot(&snap);
+                        d.insert_into(&mut props);
 
                         let event = ctx.build_event(
                             "heartbeat",
@@ -1024,6 +1205,7 @@ mod tests {
                 env_info: make_env_info(),
             },
             start_time: Instant::now(),
+            delta: Arc::new(Mutex::new(DeltaAccumulator::new())),
         }
     }
 
@@ -2407,5 +2589,219 @@ mod tests {
     fn test_template_constants() {
         assert_eq!(TEMPLATE_POLL_INTERVAL_SECS, 3);
         assert_eq!(TEMPLATE_POLL_TIMEOUT_SECS, 60 * 60);
+    }
+
+    // =========================================================================
+    // DeltaAccumulator / DeltaSnapshot
+    // =========================================================================
+
+    fn make_engine_snapshot(
+        functions: Vec<&str>,
+        triggers: Vec<(&str, &str)>,
+        workers: Vec<&str>,
+    ) -> EngineSnapshot {
+        let trigger_types: Vec<String> = triggers.iter().map(|(t, _)| t.to_string()).collect();
+        EngineSnapshot {
+            ft: FunctionTriggerData {
+                function_count: functions.len(),
+                functions: functions.iter().map(|s| s.to_string()).collect(),
+                trigger_count: triggers.len(),
+                trigger_types,
+            },
+            wd: WorkerData {
+                worker_count_total: workers.len(),
+                worker_count_by_framework: HashMap::new(),
+                worker_count_by_language: HashMap::new(),
+                workers: workers.iter().map(|s| s.to_string()).collect(),
+                sdk_languages: vec![],
+                client_type: "iii_direct".to_string(),
+                sdk_telemetry: None,
+            },
+            project: ProjectContext {
+                project_id: None,
+                project_name: None,
+                source: None,
+            },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_delta_accumulator_first_snapshot_zeros_state_deltas() {
+        reset_telemetry_globals();
+        let mut acc = DeltaAccumulator::new();
+        let snap = make_engine_snapshot(
+            vec!["fn::a", "fn::b"],
+            vec![("http", "fn::a")],
+            vec!["node"],
+        );
+
+        let d = acc.snapshot(&snap);
+
+        // First snapshot: state-change deltas must be zero so session start is
+        // not mistaken for active development.
+        assert_eq!(d.delta_function_count, 0);
+        assert_eq!(d.delta_trigger_count, 0);
+        assert_eq!(d.delta_worker_count, 0);
+        assert!(d.functions_added.is_empty());
+        assert!(d.functions_removed.is_empty());
+        assert!(d.workers_added.is_empty());
+        assert!(d.workers_removed.is_empty());
+        assert!(!d.is_active_developer());
+    }
+
+    #[test]
+    #[serial]
+    fn test_delta_accumulator_reports_added_functions() {
+        reset_telemetry_globals();
+        let mut acc = DeltaAccumulator::new();
+        let snap1 = make_engine_snapshot(vec!["fn::a"], vec![], vec![]);
+        acc.snapshot(&snap1);
+
+        let snap2 = make_engine_snapshot(vec!["fn::a", "fn::b", "fn::c"], vec![], vec![]);
+        let d = acc.snapshot(&snap2);
+
+        assert_eq!(d.delta_function_count, 2);
+        let mut added = d.functions_added.clone();
+        added.sort();
+        assert_eq!(added, vec!["fn::b".to_string(), "fn::c".to_string()]);
+        assert!(d.functions_removed.is_empty());
+        assert!(d.is_active_developer());
+    }
+
+    #[test]
+    #[serial]
+    fn test_delta_accumulator_reports_removed_functions() {
+        reset_telemetry_globals();
+        let mut acc = DeltaAccumulator::new();
+        let snap1 = make_engine_snapshot(vec!["fn::a", "fn::b"], vec![], vec![]);
+        acc.snapshot(&snap1);
+
+        let snap2 = make_engine_snapshot(vec!["fn::a"], vec![], vec![]);
+        let d = acc.snapshot(&snap2);
+
+        assert_eq!(d.delta_function_count, -1);
+        assert_eq!(d.functions_removed, vec!["fn::b".to_string()]);
+        assert!(d.functions_added.is_empty());
+        assert!(d.is_active_developer());
+    }
+
+    #[test]
+    #[serial]
+    fn test_delta_accumulator_stable_function_set_not_active_dev() {
+        reset_telemetry_globals();
+        let mut acc = DeltaAccumulator::new();
+        let snap1 = make_engine_snapshot(vec!["fn::a"], vec![], vec!["node"]);
+        acc.snapshot(&snap1);
+
+        // Exact same engine state, no registrations happened.
+        let snap2 = make_engine_snapshot(vec!["fn::a"], vec![], vec!["node"]);
+        let d = acc.snapshot(&snap2);
+
+        assert_eq!(d.delta_function_count, 0);
+        assert_eq!(d.delta_trigger_count, 0);
+        assert_eq!(d.delta_worker_count, 0);
+        assert_eq!(d.function_registrations, 0);
+        assert!(!d.is_active_developer());
+    }
+
+    #[test]
+    #[serial]
+    fn test_delta_accumulator_reregistration_flags_active_dev() {
+        reset_telemetry_globals();
+        let mut acc = DeltaAccumulator::new();
+        let snap1 = make_engine_snapshot(vec!["fn::a"], vec![], vec!["node"]);
+        acc.snapshot(&snap1);
+
+        // Same function set, but the function_registrations counter bumped —
+        // a typical hot-reload / code-edit cycle signal.
+        collector::track_function_registered();
+        let snap2 = make_engine_snapshot(vec!["fn::a"], vec![], vec!["node"]);
+        let d = acc.snapshot(&snap2);
+
+        assert_eq!(d.delta_function_count, 0);
+        assert_eq!(d.function_registrations, 1);
+        assert!(d.is_active_developer());
+    }
+
+    #[test]
+    #[serial]
+    fn test_delta_accumulator_is_active_requires_invocations() {
+        reset_telemetry_globals();
+        let mut acc = DeltaAccumulator::new();
+        let snap1 = make_engine_snapshot(vec!["fn::a"], vec![], vec![]);
+        acc.snapshot(&snap1);
+
+        // No invocations between snapshots: not active.
+        let snap2 = make_engine_snapshot(vec!["fn::a"], vec![], vec![]);
+        let d = acc.snapshot(&snap2);
+        assert!(!d.is_active());
+
+        get_metrics_accumulator()
+            .invocations_total
+            .fetch_add(3, Ordering::Relaxed);
+        let snap3 = make_engine_snapshot(vec!["fn::a"], vec![], vec![]);
+        let d2 = acc.snapshot(&snap3);
+        assert_eq!(d2.invocations_total, 3);
+        assert!(d2.is_active());
+    }
+
+    #[test]
+    #[serial]
+    fn test_delta_accumulator_worker_churn_does_not_flag_active_dev() {
+        reset_telemetry_globals();
+        let mut acc = DeltaAccumulator::new();
+        let snap1 = make_engine_snapshot(vec!["fn::a"], vec![], vec!["node"]);
+        acc.snapshot(&snap1);
+
+        // SDK reconnects: worker set changed but function set is stable and no
+        // new registrations happened (e.g., engine reused the function entry).
+        let snap2 = make_engine_snapshot(vec!["fn::a"], vec![], vec!["python"]);
+        let d = acc.snapshot(&snap2);
+
+        assert_eq!(d.delta_worker_count, 0);
+        assert_eq!(d.workers_added, vec!["python".to_string()]);
+        assert_eq!(d.workers_removed, vec!["node".to_string()]);
+        assert!(
+            !d.is_active_developer(),
+            "worker churn alone must not mark the session as active development"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_delta_snapshot_insert_into_emits_expected_keys() {
+        reset_telemetry_globals();
+        let mut acc = DeltaAccumulator::new();
+        let snap = make_engine_snapshot(vec!["fn::a"], vec![], vec![]);
+        let d = acc.snapshot(&snap);
+
+        let mut m = serde_json::Map::new();
+        d.insert_into(&mut m);
+
+        for key in &[
+            "delta_invocations_total",
+            "delta_invocations_success",
+            "delta_invocations_error",
+            "delta_api_requests",
+            "delta_queue_emits",
+            "delta_queue_consumes",
+            "delta_pubsub_publishes",
+            "delta_pubsub_subscribes",
+            "delta_cron_executions",
+            "delta_function_registrations",
+            "delta_trigger_registrations",
+            "delta_function_count",
+            "delta_trigger_count",
+            "delta_worker_count",
+            "functions_added",
+            "functions_removed",
+            "workers_added",
+            "workers_removed",
+            "is_active",
+            "is_active_developer",
+        ] {
+            assert!(m.contains_key(*key), "missing key: {key}");
+        }
     }
 }
