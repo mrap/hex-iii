@@ -2433,6 +2433,231 @@ mod tests {
     }
 
     #[test]
+    fn binary_config_yaml_returns_none_for_null_json() {
+        assert_eq!(binary_config_yaml(&serde_json::Value::Null), None);
+    }
+
+    #[test]
+    fn binary_config_yaml_returns_none_for_inner_null() {
+        let wrapped = serde_json::json!({ "config": null });
+        assert_eq!(binary_config_yaml(&wrapped), None);
+    }
+
+    use crate::cli::lockfile as cli_lockfile;
+    use crate::cli::registry as cli_registry;
+    use std::collections::HashMap as StdHashMap;
+
+    fn resolved_binary_worker(
+        name: &str,
+        version: &str,
+        binaries: StdHashMap<String, cli_registry::BinaryInfo>,
+    ) -> cli_registry::ResolvedWorker {
+        cli_registry::ResolvedWorker {
+            name: name.to_string(),
+            worker_type: "binary".to_string(),
+            version: version.to_string(),
+            repo: format!("https://example.com/{name}"),
+            config: serde_json::Value::Null,
+            binaries: Some(binaries),
+            image: None,
+            dependencies: StdHashMap::new(),
+        }
+    }
+
+    fn resolved_image_worker(
+        name: &str,
+        version: &str,
+        image: Option<String>,
+    ) -> cli_registry::ResolvedWorker {
+        cli_registry::ResolvedWorker {
+            name: name.to_string(),
+            worker_type: "image".to_string(),
+            version: version.to_string(),
+            repo: format!("https://example.com/{name}"),
+            config: serde_json::Value::Null,
+            binaries: None,
+            image,
+            dependencies: StdHashMap::new(),
+        }
+    }
+
+    fn graph_with(worker: cli_registry::ResolvedWorker) -> cli_registry::ResolvedWorkerGraph {
+        cli_registry::ResolvedWorkerGraph {
+            root: cli_registry::ResolvedRoot {
+                name: worker.name.clone(),
+                version: worker.version.clone(),
+            },
+            target: Some("aarch64-apple-darwin".to_string()),
+            graph: vec![worker],
+            edges: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn lockfile_from_graph_errors_when_binary_worker_missing_binaries() {
+        // A binary worker with `binaries: None` in the resolver response means
+        // the registry is inconsistent; surface the worker name so the CLI
+        // error message is actionable.
+        let mut worker =
+            resolved_binary_worker("hello-worker", "1.0.0", StdHashMap::new());
+        worker.binaries = None;
+
+        let err = lockfile_from_graph(&graph_with(worker), "aarch64-apple-darwin").unwrap_err();
+
+        assert!(err.contains("hello-worker"));
+        assert!(err.contains("no binaries"));
+    }
+
+    #[test]
+    fn lockfile_from_graph_errors_when_binary_worker_lacks_current_target_artifact() {
+        let mut binaries = StdHashMap::new();
+        binaries.insert(
+            "x86_64-unknown-linux-gnu".to_string(),
+            cli_registry::BinaryInfo {
+                url: "https://example.com/linux.tar.gz".to_string(),
+                sha256: "b".repeat(64),
+            },
+        );
+        let worker = resolved_binary_worker("hello-worker", "1.0.0", binaries);
+
+        let err = lockfile_from_graph(&graph_with(worker), "aarch64-apple-darwin").unwrap_err();
+
+        assert!(err.contains("hello-worker"));
+        assert!(err.contains("aarch64-apple-darwin"));
+    }
+
+    #[test]
+    fn lockfile_from_graph_errors_when_image_worker_missing_image_ref() {
+        let worker = resolved_image_worker("image-worker", "1.0.0", None);
+
+        let err = lockfile_from_graph(&graph_with(worker), "aarch64-apple-darwin").unwrap_err();
+
+        assert!(err.contains("image-worker"));
+        assert!(err.contains("no image"));
+    }
+
+    #[test]
+    fn lockfile_from_graph_errors_on_unsupported_worker_type() {
+        let mut worker = resolved_image_worker(
+            "wasm-worker",
+            "1.0.0",
+            Some("ghcr.io/iii-hq/wasm@sha256:abc".to_string()),
+        );
+        worker.worker_type = "wasm".to_string();
+
+        let err = lockfile_from_graph(&graph_with(worker), "aarch64-apple-darwin").unwrap_err();
+
+        assert!(err.contains("wasm-worker"));
+        assert!(err.contains("wasm"));
+    }
+
+    #[test]
+    fn lockfile_from_graph_builds_entry_for_binary_worker_with_matching_target() {
+        let mut binaries = StdHashMap::new();
+        binaries.insert(
+            "aarch64-apple-darwin".to_string(),
+            cli_registry::BinaryInfo {
+                url: "https://example.com/h.tar.gz".to_string(),
+                sha256: "c".repeat(64),
+            },
+        );
+        let mut worker = resolved_binary_worker("hello-worker", "1.0.0", binaries);
+        worker
+            .dependencies
+            .insert("helper".to_string(), "^1.0.0".to_string());
+
+        let lock = lockfile_from_graph(&graph_with(worker), "aarch64-apple-darwin").unwrap();
+
+        let entry = lock.workers.get("hello-worker").expect("entry present");
+        assert_eq!(entry.version, "1.0.0");
+        assert_eq!(entry.dependencies.get("helper").unwrap(), "^1.0.0");
+        assert!(matches!(
+            entry.worker_type,
+            cli_lockfile::LockedWorkerType::Binary
+        ));
+        match &entry.source {
+            cli_lockfile::LockedSource::Binary {
+                target,
+                url,
+                sha256,
+            } => {
+                assert_eq!(target, "aarch64-apple-darwin");
+                assert_eq!(url, "https://example.com/h.tar.gz");
+                assert_eq!(sha256.len(), 64);
+            }
+            other => panic!("expected binary source, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn lockfile_from_graph_records_image_type_for_image_worker() {
+        let worker = resolved_image_worker(
+            "image-worker",
+            "1.0.0",
+            Some("ghcr.io/iii-hq/image@sha256:abc".to_string()),
+        );
+
+        let lock = lockfile_from_graph(&graph_with(worker), "aarch64-apple-darwin").unwrap();
+
+        let entry = lock.workers.get("image-worker").expect("entry present");
+        assert!(matches!(
+            entry.worker_type,
+            cli_lockfile::LockedWorkerType::Image
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_worker_sync_fails_when_lockfile_is_absent() {
+        in_temp_dir_async(|_| async move {
+            let rc = handle_worker_sync(false).await;
+            assert_eq!(rc, 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn handle_worker_sync_frozen_delegates_to_verify_and_fails_without_lockfile() {
+        in_temp_dir_async(|_| async move {
+            let rc = handle_worker_sync(true).await;
+            assert_eq!(rc, 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn handle_worker_verify_fails_when_lockfile_is_absent() {
+        in_temp_dir_async(|_| async move {
+            let rc = handle_worker_verify().await;
+            assert_eq!(rc, 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn handle_worker_update_rejects_invalid_worker_name_before_touching_disk() {
+        in_temp_dir_async(|_| async move {
+            // No lockfile exists, but the validation error must fire first
+            // so the rc is 1 due to the name check, not the missing file.
+            let rc = handle_worker_update(Some("../evil")).await;
+            assert_eq!(rc, 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn handle_worker_update_fails_when_named_worker_not_in_lockfile() {
+        in_temp_dir_async(|_| async move {
+            // Write a minimal valid lockfile that does NOT contain "ghost".
+            let lock = cli_lockfile::WorkerLockfile::default();
+            lock.write_to(cli_lockfile::lockfile_path()).unwrap();
+
+            let rc = handle_worker_update(Some("ghost")).await;
+            assert_eq!(rc, 1);
+        })
+        .await;
+    }
+
+    #[test]
     fn binary_config_yaml_extracts_wrapped_registry_config() {
         let config = serde_json::json!({
             "name": "image-resize",

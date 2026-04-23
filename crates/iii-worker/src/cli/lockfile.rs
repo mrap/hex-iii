@@ -155,4 +155,104 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("hello-worker"));
     }
+
+    #[test]
+    fn verify_config_workers_passes_when_every_config_worker_is_locked() {
+        let mut lock = WorkerLockfile::default();
+        lock.workers.insert(
+            "hello-worker".to_string(),
+            LockedWorker {
+                version: "1.0.0".to_string(),
+                worker_type: LockedWorkerType::Binary,
+                dependencies: BTreeMap::new(),
+                source: LockedSource::Binary {
+                    target: "aarch64-apple-darwin".to_string(),
+                    url: "https://example.com/h.tar.gz".to_string(),
+                    sha256: "a".repeat(64),
+                },
+            },
+        );
+
+        assert!(
+            lock.verify_config_workers(&["hello-worker".to_string()])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn verify_config_workers_is_intentionally_asymmetric() {
+        // Lock has extras that config does not mention. The current design
+        // only flags workers present in config.yaml but missing from the
+        // lockfile, not the inverse. Encoding that as a test so future
+        // changes to symmetry require an intentional update.
+        let mut lock = WorkerLockfile::default();
+        lock.workers.insert(
+            "extra-worker".to_string(),
+            LockedWorker {
+                version: "1.0.0".to_string(),
+                worker_type: LockedWorkerType::Image,
+                dependencies: BTreeMap::new(),
+                source: LockedSource::Image {
+                    image: "ghcr.io/iii-hq/extra@sha256:abc".to_string(),
+                },
+            },
+        );
+
+        assert!(lock.verify_config_workers(&[]).is_ok());
+    }
+
+    #[test]
+    fn verify_config_workers_lists_every_missing_name() {
+        let lock = WorkerLockfile::default();
+
+        let err = lock
+            .verify_config_workers(&["a".to_string(), "b".to_string()])
+            .unwrap_err();
+
+        assert!(err.contains("a"));
+        assert!(err.contains("b"));
+    }
+
+    #[test]
+    fn from_yaml_rejects_garbage_input() {
+        let err = WorkerLockfile::from_yaml("this is not yaml: : :").unwrap_err();
+        assert!(err.contains("iii.lock"));
+    }
+
+    #[test]
+    fn write_to_reports_unwritable_paths() {
+        // A path whose parent does not exist is always unwritable.
+        let dir = tempfile::tempdir().unwrap();
+        let bogus = dir.path().join("does").join("not").join("exist.lock");
+
+        let lock = WorkerLockfile::default();
+        let err = lock.write_to(&bogus).unwrap_err();
+
+        assert!(err.contains(bogus.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn read_from_roundtrips_via_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("iii.lock");
+
+        let mut lock = WorkerLockfile::default();
+        lock.workers.insert(
+            "hello".to_string(),
+            LockedWorker {
+                version: "1.0.0".to_string(),
+                worker_type: LockedWorkerType::Binary,
+                dependencies: BTreeMap::new(),
+                source: LockedSource::Binary {
+                    target: "aarch64-apple-darwin".to_string(),
+                    url: "https://example.com/h.tar.gz".to_string(),
+                    sha256: "a".repeat(64),
+                },
+            },
+        );
+        lock.write_to(&path).unwrap();
+
+        let parsed = WorkerLockfile::read_from(&path).unwrap();
+        assert_eq!(parsed, lock);
+    }
 }
