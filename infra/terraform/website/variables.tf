@@ -58,6 +58,14 @@ variable "github_environment" {
   default     = "iii-website-prod"
 }
 
+variable "github_tf_apply_environment" {
+  # Distinct from github_environment so the apply env can be configured with
+  # required reviewers without gating routine S3 deploys.
+  description = "GitHub environment scoping the tf-apply role. Configure required reviewers on this env in repo settings to gate applies."
+  type        = string
+  default     = "iii-website-prod-tf-apply"
+}
+
 variable "csp_report_only" {
   description = "Send CSP as report-only instead of enforcing."
   type        = bool
@@ -65,18 +73,12 @@ variable "csp_report_only" {
 }
 
 variable "manage_apex_records" {
-  # Phase 4 cutover is complete (see #1470). Records were imported into state
-  # and Terraform now owns them. Flag retained as an escape hatch for emergency
-  # rollback — set to false to release ownership without destroying the records
-  # (use `terraform state rm` after flipping).
   description = "Whether Terraform manages the iii.dev apex A/AAAA Route53 records."
   type        = bool
   default     = true
 }
 
 variable "manage_www_records" {
-  # Phase 4 cutover complete; same situation as manage_apex_records. Decoupled
-  # from apex so the two can be released independently if ever needed.
   description = "Whether Terraform manages the www.iii.dev A/AAAA Route53 records."
   type        = bool
   default     = true
