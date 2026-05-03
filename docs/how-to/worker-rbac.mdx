@@ -3,7 +3,13 @@ title: 'Worker RBAC'
 description: 'Configure the iii-worker-manager to enable role-based access control for workers connecting over WebSocket.'
 ---
 
-This guide walks you through enabling RBAC on your iii instance using the **iii-worker-manager**. Workers connect via WebSocket to a dedicated RBAC port, separate from the internal engine bridge.
+## Goal
+
+Enable role-based access control for workers connecting to your iii instance, allowing you to authenticate connections, control function access, and add middleware.
+
+## Context
+
+Use this guide when you need to expose iii functions to external workers (browsers, mobile apps, third-party services) with authentication and authorization. For type definitions and configuration reference, see [iii-worker-manager](/workers/iii-worker-manager).
 
 ## 1. Add RBAC Config to the Worker Manager
 
@@ -542,107 +548,17 @@ rbac:
         tier: "free"
 ```
 
-## Types Reference
+## Result
 
-All three SDKs export the following types for RBAC functions.
+Your iii instance now has:
+- A dedicated RBAC port (49135) for external workers
+- Authentication via your auth function
+- Fine-grained access control per function
+- Optional middleware for validation and audit logging
 
-### AuthInput
-
-Input passed to the auth function during the WebSocket upgrade.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `headers` | `Record<string, string>` | HTTP headers from the upgrade request. |
-| `query_params` | `Record<string, string[]>` | Query parameters. Each key maps to an array of values to support repeated keys. |
-| `ip_address` | `string` | IP address of the connecting client. |
-
-### AuthResult
-
-Return value from the auth function. Controls access and passes context to middleware.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `allowed_functions` | `string[]` | `[]` | Additional function IDs to allow beyond `expose_functions`. |
-| `forbidden_functions` | `string[]` | `[]` | Function IDs to deny even if they match `expose_functions`. Takes precedence. |
-| `allowed_trigger_types` | `string[]` or omitted | omitted (permissive) | Trigger type IDs the worker may register triggers for. When omitted, all types are allowed. |
-| `allow_trigger_type_registration` | `boolean` | `false` | Whether the worker may register new trigger types. |
-| `allow_function_registration` | `boolean` | `true` | Whether the worker may register new functions. |
-| `function_registration_prefix` | `string` or omitted | omitted | When set, all function IDs registered by this worker are internally prefixed with `{prefix}::`. Triggers auto-prefix their `function_id` reference. The prefix is stripped when invoking the worker, so the worker SDK never sees it. |
-| `context` | `Record<string, unknown>` | `{}` | Arbitrary context forwarded to the middleware function on every invocation. |
-
-### MiddlewareFunctionInput
-
-Input passed to the middleware function on every invocation through the RBAC port.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `function_id` | `string` | ID of the function being invoked. |
-| `payload` | `Record<string, unknown>` | Payload sent by the caller. |
-| `action` | `TriggerAction` or omitted | Routing action (enqueue, void), if any. |
-| `context` | `Record<string, unknown>` | Auth context from `AuthResult.context` for this session. |
-
-### OnTriggerTypeRegistrationInput
-
-Input passed to the `on_trigger_type_registration_function_id` hook. Return an `OnTriggerTypeRegistrationResult` or throw to deny.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `trigger_type_id` | `string` | ID of the trigger type being registered. |
-| `description` | `string` | Human-readable description of the trigger type. |
-| `context` | `Record<string, unknown>` | Auth context from `AuthResult.context`. |
-
-### OnTriggerTypeRegistrationResult
-
-Result returned from the `on_trigger_type_registration_function_id` hook. Omitted fields keep the original value.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `trigger_type_id` | `string` or omitted | Mapped trigger type ID. |
-| `description` | `string` or omitted | Mapped description. |
-
-### OnTriggerRegistrationInput
-
-Input passed to the `on_trigger_registration_function_id` hook. Return an `OnTriggerRegistrationResult` or throw to deny.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `trigger_id` | `string` | ID of the trigger being registered. |
-| `trigger_type` | `string` | Trigger type identifier. |
-| `function_id` | `string` | ID of the function this trigger is bound to. |
-| `config` | `unknown` | Trigger-specific configuration. |
-| `context` | `Record<string, unknown>` | Auth context from `AuthResult.context`. |
-
-### OnTriggerRegistrationResult
-
-Result returned from the `on_trigger_registration_function_id` hook. Omitted fields keep the original value.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `trigger_id` | `string` or omitted | Mapped trigger ID. |
-| `trigger_type` | `string` or omitted | Mapped trigger type. |
-| `function_id` | `string` or omitted | Mapped function ID. |
-| `config` | `unknown` or omitted | Mapped trigger configuration. |
-
-### OnFunctionRegistrationInput
-
-Input passed to the `on_function_registration_function_id` hook. Return an `OnFunctionRegistrationResult` or throw to deny.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `function_id` | `string` | ID of the function being registered. |
-| `description` | `string` or omitted | Human-readable description of the function. |
-| `metadata` | `Record<string, unknown>` or omitted | Arbitrary metadata attached to the function. |
-| `context` | `Record<string, unknown>` | Auth context from `AuthResult.context`. |
-
-### OnFunctionRegistrationResult
-
-Result returned from the `on_function_registration_function_id` hook. Omitted fields keep the original value.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `function_id` | `string` or omitted | Mapped function ID. |
-| `description` | `string` or omitted | Mapped description. |
-| `metadata` | `Record<string, unknown>` or omitted | Mapped metadata. |
+<Info title="Type Reference">
+  For complete type definitions (`AuthInput`, `AuthResult`, `MiddlewareFunctionInput`, etc.), see the [iii-worker-manager reference](/workers/iii-worker-manager#rbac-authentication).
+</Info>
 
 ## Full Example Config
 

@@ -204,99 +204,7 @@ curl -X POST http://localhost:3111/math/add-two-numbers \
 
 The same functions that respond to `iii trigger` now also respond to HTTP requests with no code changes to the handlers themselves.
 
-## 8. How it works
-
-### Python worker
-
-`workers/math-worker/math_worker.py`:
-
-```python
-import os
-from iii import register_worker, InitOptions, Logger
-
-iii = register_worker(
-    os.environ.get("III_URL", "ws://localhost:49134"),
-    InitOptions(worker_name="math-worker"),
-)
-logger = Logger()
-
-
-def add_handler(payload: dict) -> dict:
-    a = payload.get("a", 0)
-    b = payload.get("b", 0)
-    logger.info(f"math::add called in Python with a={a}, b={b}")
-    return {"c": a + b}
-
-
-iii.register_function("math::add", add_handler)
-```
-
-`register_worker` connects to the engine over WebSocket. `register_function` makes `math::add` available to the entire system.
-
-### TypeScript worker
-
-`workers/caller-worker/src/worker.ts`:
-
-```typescript
-import { registerWorker, Logger } from 'iii-sdk';
-
-const iii = registerWorker(process.env.III_URL ?? 'ws://localhost:49134');
-const logger = new Logger();
-
-iii.registerFunction(
-  'math::add_two_numbers',
-  async (payload: { a: number; b: number }) => {
-    logger.info('math::add_two_numbers called in TypeScript', payload);
-
-    const result = await iii.trigger({
-      function_id: 'math::add',
-      payload,
-    });
-
-    return result;
-  },
-);
-```
-
-`registerWorker` connects to the engine the same way the Python worker does. The `iii.trigger()` call inside the handler invokes
-`math::add` on the Python worker through the engine. The TypeScript worker doesn't need to know where the `math::add` function
-is running, its language, or anything else.
-
-### Worker manifest
-
-Each worker has an `iii.worker.yaml` that describes how to run the worker. Here is the Python worker's manifest.
-While these workers are started with the `iii worker add` command they do not need to be running alongside the iii
-instance. These workers can run anywhere and even be replicated. Every worker simply connects to iii over WebSocket.
-iii then handles all routing.
-
-```yaml
-name: math-worker
-runtime:
-  kind: python
-  package_manager: pip
-  entry: math_worker.py
-scripts:
-  install: "pip install -r requirements.txt"
-  start: "python math_worker.py"
-```
-
-`name` identifies the worker. `runtime` tells the engine the language and entrypoint. `scripts` define how to install dependencies and start the worker.
-
-### Architecture
-
-```mermaid
-graph TD
-  CLI["iii trigger (CLI)"] <-->|WS| Engine["iii engine :49134"]
-  HTTP["curl / HTTP"] <-->|HTTP :3111| Engine
-
-  Engine --> Math["math-worker (Python) math::add"]
-  Engine --> Caller["caller-worker (TypeScript) math::add_two_numbers"]
-
-  Math --> State["iii-state"]
-  Caller --> HttpWorker["iii-http"]
-```
-
-## 9. Explore with the iii Console (Optional)
+## 8. Explore with the iii Console (Optional)
 
 iii contains an interactive web interface to help observe a iii system end to end. It's particularly useful for debugging.
 
@@ -312,7 +220,7 @@ Open your browser to [http://localhost:3113/](http://localhost:3113/) to see wor
   See the full [Console documentation](/console) for details on invoking functions, inspecting traces, viewing state, and more.
 </Tip>
 
-## 10. Add Agent Skills (Optional)
+## 9. Add Agent Skills (Optional)
 
 Give your IDEs and AI coding agents full context on iii:
 
