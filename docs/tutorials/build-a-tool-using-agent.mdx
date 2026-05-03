@@ -1,6 +1,6 @@
 ---
 title: 'Build a tool-using agent worker'
-description: 'Register an LLM-backed function that calls other iii functions as tools, persists conversation in iii-state, and streams tokens back through iii-stream.'
+description: 'Write a worker that calls an LLM, invokes other iii functions as tools, persists conversation in iii-state, and streams tokens back through iii-stream.'
 ---
 
 <Info title="Track 3 — iii for AI agents">
@@ -13,23 +13,25 @@ description: 'Register an LLM-backed function that calls other iii functions as 
 A worker that *is* an agent — not just a tool surface for an external
 agent. The agent worker:
 
-1. Receives a user message via HTTP or a queue.
+1. Receives a user message via HTTP.
 2. Calls an LLM provider with the iii function catalog as available
    tools.
-3. Executes tool calls by invoking other iii functions.
-4. Persists conversation history in `iii-state`.
+3. Executes tool calls by invoking other iii functions through the
+   engine.
+4. Persists conversation state in `iii-state`.
 5. Streams tokens back to the caller via `iii-stream`.
 
 ## Prerequisites
 
-- iii engine running.
-- An LLM API key (OpenAI, Anthropic, or any provider you prefer).
+- Engine running locally.
+- An LLM API key.
 - Workers from earlier tutorials registered (so the agent has tools to
-  call).
+  call). Anything you registered for [Tutorial 7](/tutorials/expose-functions-as-mcp-tools)
+  is fair game.
 
 ## Steps
 
-### 1. Add the workers the agent needs
+### 1. Add the supporting workers
 
 ```bash
 iii worker add iii-state
@@ -37,47 +39,75 @@ iii worker add iii-stream
 iii worker add iii-http
 ```
 
-### 2. Register the agent function
+### 2. Build the tool catalog from iii itself
 
-Create a worker that registers `agent::chat`. Inside the handler:
+Iterate the engine's function registry, keep only functions you want
+the agent to use, and convert each to your LLM's tool schema.
 
-{/* TODO: code skeleton (TS or Python) showing:
-   - read `conversations/{session_id}` from iii-state
-   - call LLM with messages + tool catalog (built from iii.listFunctions filtered by tag)
-   - if tool_calls: iii.invoke(tool.id, tool.args), append to messages, loop
-   - stream tokens via iii-stream channel `agent.tokens.{session_id}`
-   - persist updated conversation back to iii-state
-*/}
-
-### 3. Build the tool catalog from iii itself
-
-Iterate the engine's function registry, keep only functions tagged
-`agent.tool`, and convert each to your LLM's tool schema.
-
-{/* TODO: code stub — listFunctions + filter + map to OpenAI/Anthropic tool format */}
+{/* TODO: confirm the function-listing API. Likely something like:
+    const fns = await iii.trigger({ function_id: 'engine::list_functions' });
+    Then filter by metadata/tag and map to OpenAI/Anthropic tool format. */}
 
 <Tip>
-  Reuse the `mcp.expose` tag from [Tutorial 7](/tutorials/expose-functions-as-mcp-tools)
-  if you want the same set of tools to be available to both your custom
-  agent and external MCP clients.
+  Reuse the opt-in convention from
+  [Tutorial 7](/tutorials/expose-functions-as-mcp-tools) so the same
+  set of tools is available to your custom agent and to external MCP
+  clients.
 </Tip>
 
-### 4. Wire HTTP and stream triggers
+### 3. Register the agent function
 
-```yaml
+```ts
+{/* TODO: code skeleton:
+   iii.registerFunction('agent::chat', async ({ session_id, message }) => {
+     const history = (await iii.trigger({
+       function_id: 'state::get',
+       payload: { scope: 'agent.chats', key: session_id },
+     })) ?? [];
+     history.push({ role: 'user', content: message });
+
+     while (true) {
+       const resp = await llm.chat(history, { tools: catalog,
+         on_token: (t) => iii.trigger({
+           function_id: 'stream::set',
+           payload: { stream: 'agent.tokens', group: session_id,
+                      id: ulid(), data: { delta: t } },
+         }),
+       });
+       history.push(resp.message);
+       if (!resp.tool_calls?.length) break;
+       for (const tc of resp.tool_calls) {
+         const out = await iii.trigger({ function_id: tc.id, payload: tc.args });
+         history.push({ role: 'tool', tool_call_id: tc.tc_id, content: JSON.stringify(out) });
+       }
+     }
+
+     await iii.trigger({
+       function_id: 'state::set',
+       payload: { scope: 'agent.chats', key: session_id, value: history },
+     });
+     return { ok: true };
+   });
+*/}
+```
+
+### 4. Wire HTTP entry and stream output
+
+```ts
 {/* TODO: HTTP trigger POST /agent/chat → agent::chat
-   plus stream binding agent.tokens.{session_id} for SSE/WebSocket consumers */}
+    plus instructions for clients to subscribe to
+    ws://host/stream/agent.tokens/{session_id}/ for token deltas. */}
 ```
 
 ### 5. Try it
 
 ```bash
-curl -N -X POST http://localhost:PORT/agent/chat \
-  -d '{"session_id":"s1","message":"add a todo to ship the docs"}'
+curl -X POST http://localhost:3111/agent/chat \
+  -d '{"session_id":"s1","message":"create a note titled ship the docs"}'
 ```
 
-You should see tokens stream back, and a new entry appear via
-`todos::create`.
+In a browser tab subscribed to the `agent.tokens/s1` stream, you'll see
+tokens stream in. The note function gets invoked as a tool call.
 
 ## Result
 
@@ -89,12 +119,12 @@ changes.
 
 ```mermaid
 graph TB
-  User -->|HTTP| HTTP[iii-http]
+  User -->|HTTP POST| HTTP[iii-http]
   HTTP --> Agent[agent::chat]
-  Agent -->|tokens| Stream[iii-stream]
+  Agent -->|stream::set tokens| Stream[iii-stream]
   Stream --> User
-  Agent -->|read/write history| State[iii-state]
-  Agent -->|invoke tools| Tools[other iii functions]
+  Agent -->|state::get/set history| State[iii-state]
+  Agent -->|invoke tool| Tools[other iii functions]
 ```
 
 ## Next steps
@@ -103,5 +133,3 @@ graph TB
   a ready-made agent worker (`proof`).
 - [Tutorial 10 — Durable agent memory](/tutorials/durable-agent-memory):
   add scheduled reflection and long-term memory.
-- The [`iii-agentic-backend` skill](https://github.com/iii-hq/iii)
-  collects agent-orchestration patterns.

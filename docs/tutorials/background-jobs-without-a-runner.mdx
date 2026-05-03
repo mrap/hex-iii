@@ -1,6 +1,6 @@
 ---
-title: 'Background jobs without a job runner'
-description: 'Replace Sidekiq, BullMQ, or Celery for the simple case using iii-queue with retries, concurrency, and a dead-letter queue.'
+title: 'Background jobs with iii-queue'
+description: 'Use iii-queue to get retries with backoff, concurrency limits, and a dead-letter queue without installing Redis-backed job infrastructure.'
 ---
 
 <Info title="Track 2 — Adopt iii incrementally">
@@ -11,12 +11,12 @@ description: 'Replace Sidekiq, BullMQ, or Celery for the simple case using iii-q
 
 A background job pipeline — "send a welcome email when a user signs up"
 — with the same guarantees a typical job runner gives you (retries,
-backoff, concurrency, DLQ), but without installing Redis-backed
-infrastructure or a separate job framework.
+backoff, concurrency, DLQ), but provided by `iii-queue` rather than a
+separate framework.
 
 ## Prerequisites
 
-- iii engine running.
+- Engine running locally.
 
 ## Steps
 
@@ -28,62 +28,77 @@ iii worker add iii-queue
 
 ### 2. Register the job handler
 
-Register a function `email::send-welcome` in any worker (TS, Python, or
-Rust). It performs the actual side effect.
+In a worker, register `email::send-welcome`. It performs the actual
+side effect — for the tutorial, just log the parameters.
 
-{/* TODO: code stub — handler signature in TS, deliberately small (logs the email send for the tutorial) */}
-
-### 3. Configure a named queue bound to the handler
-
-```yaml
-{/* TODO: real queue config:
-  name: emails.welcome
-  function_id: email::send-welcome
-  concurrency: 4
-  max_attempts: 5
-  backoff: { strategy: exponential, base_ms: 500, max_ms: 30000 }
-  dlq: emails.welcome.dlq
+```ts
+{/* TODO: real handler skeleton:
+   iii.registerFunction('email::send-welcome', async ({ user_id }) => {
+     // pretend to send an email
+     console.log('sending welcome to', user_id);
+     return { sent: true };
+   });
 */}
 ```
 
-### 4. Enqueue jobs from your app
+### 3. Bind a queue trigger to the handler
 
-From any worker (or the CLI):
-
-```bash
-iii queue enqueue emails.welcome --data '{"user_id":"u_123"}'
+```ts
+{/* TODO: confirm exact registerTrigger shape for iii-queue. Outline:
+   iii.registerTrigger({
+     type: 'queue',
+     function_id: 'email::send-welcome',
+     config: {
+       name: 'emails.welcome',
+       max_attempts: 5,
+       backoff: { strategy: 'exponential', base_ms: 500, max_ms: 30000 },
+       concurrency: 4,
+       dlq: 'emails.welcome.dlq',
+     },
+   });
+*/}
 ```
 
-{/* TODO: confirm exact CLI subcommand and SDK call signature for enqueue */}
+### 4. Enqueue jobs
+
+From any worker — or from the CLI:
+
+```bash
+{/* TODO: confirm CLI subcommand. Likely something like:
+   iii trigger --function-id=queue::enqueue \
+     --payload='{"queue":"emails.welcome","data":{"user_id":"u_123"}}'
+*/}
+```
 
 ### 5. Inspect retries and the DLQ
 
-Cause a few failures (raise inside the handler for a specific user_id),
-then watch the console:
+Cause failures by `throw`ing inside the handler for a particular
+`user_id`. In the iii console you'll see:
 
-- Live attempts visible per job.
-- After `max_attempts` the job lands in `emails.welcome.dlq`.
-- Redrive from the DLQ when fixed.
+- Per-attempt logs.
+- Exponential backoff between attempts.
+- The job landing in `emails.welcome.dlq` after `max_attempts`.
+
+Use the console to redrive the DLQ once the bug is fixed.
 
 ## Result
 
-You have durable background jobs with retries and a DLQ — no Redis, no
-job framework, no separate dashboard. Just one extra worker added to the
-engine.
+Durable background jobs with retries and a DLQ — no Redis cluster, no
+separate dashboard, no job framework to operate. Just one extra worker.
 
 ## What you just composed
 
 ```mermaid
 graph LR
-  App[your app] -->|enqueue| Q[iii-queue: emails.welcome]
+  App[your code] -->|enqueue| Q[iii-queue: emails.welcome]
   Q -->|attempt 1..N| H[email::send-welcome]
   Q -.->|after N failures| DLQ[(emails.welcome.dlq)]
-  Console[Console] -.-> Q
+  Console -.-> Q
 ```
 
 ## Next steps
 
-- [Tutorial 6 — Real-time dashboard](/tutorials/realtime-dashboard)
+- [Tutorial 6 — Push live updates with iii-stream](/tutorials/realtime-dashboard)
 - [How-to: Use named queues](/how-to/use-named-queues)
 - [How-to: Dead letter queues](/how-to/dead-letter-queues)
 - [Reference: iii-queue](/workers/iii-queue)

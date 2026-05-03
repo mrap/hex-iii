@@ -1,6 +1,6 @@
 ---
-title: 'Real-time dashboard'
-description: 'Push live state changes to a browser using iii-stream and the browser SDK — no WebSocket server to write or operate.'
+title: 'Push live updates with iii-stream'
+description: 'Use stream::set to persist, broadcast, and react to data changes in one call. Subscribe from the browser SDK with no WebSocket server to operate.'
 ---
 
 <Info title="Track 2 — Adopt iii incrementally">
@@ -9,17 +9,19 @@ description: 'Push live state changes to a browser using iii-stream and the brow
 
 ## What you'll build
 
-A live dashboard page that updates whenever the underlying state
-changes. You write zero WebSocket code — `iii-stream` and the browser
-SDK handle the transport.
+A live "orders" page that updates in real time. The pattern is one
+call: `stream::set` persists the data, broadcasts it to every browser
+subscribed to the stream, **and** fires any registered `stream`
+triggers — all in one operation.
 
-The example domain: a "live orders" page that updates whenever any
-worker writes to the `orders/*` keyspace.
+Streams are organized as `stream_name > group_id > item_id`. Clients
+subscribe at the group level by connecting to
+`ws://host/stream/{stream_name}/{group_id}/`.
 
 ## Prerequisites
 
-- iii engine running.
-- A simple frontend project (Vite + React or plain HTML works).
+- Engine running locally.
+- A simple frontend (Vite + React or plain HTML).
 
 ## Steps
 
@@ -29,65 +31,92 @@ worker writes to the `orders/*` keyspace.
 iii worker add iii-stream
 ```
 
-### 2. React to state changes and publish to a stream
+### 2. Publish updates from any worker
 
-Register a function `orders::on-change` triggered by state writes under
-`orders/*`. Inside, it publishes the change onto a stream named
-`orders.live`.
+Anywhere your code learns about a new or updated order, call
+`stream::set` with the stream, group, and item identifiers:
 
-{/* TODO: code stub — state-trigger registration + iii-stream publish call */}
+```ts
+{/* TODO: confirm exact stream::set payload shape against
+    docs/workers/iii-stream.mdx. Outline:
+    await iii.trigger({
+      function_id: 'stream::set',
+      payload: {
+        stream: 'orders',
+        group: 'global',
+        id: order.id,
+        data: order,
+      },
+    });
+*/}
+```
+
+That single call:
+
+1. Persists the item via the configured adapter (Redis or KvStore).
+2. Pushes the update to every WebSocket client subscribed to
+   `orders/global`.
+3. Fires any registered `stream` triggers (so you can react in another
+   worker too, if you want).
 
 ### 3. Subscribe from the browser
 
-Install the browser SDK in your frontend:
+Install the browser SDK:
 
 ```bash
 pnpm add iii-browser-sdk
 ```
 
-Connect and subscribe:
+Open a stream subscription:
 
 ```ts
-{/* TODO: real iii-browser-sdk snippet:
-   const iii = new IIIBrowser({ url: 'ws://localhost:49134' });
-   iii.streams.subscribe('orders.live', (event) => updateUI(event));
+{/* TODO: confirm exact iii-browser-sdk subscription API. Outline:
+    import { IIIBrowser } from 'iii-browser-sdk';
+    const iii = new IIIBrowser({ url: 'ws://localhost:3112' });
+    iii.streams.subscribe('orders', 'global', (event) => {
+      updateUI(event.data);
+    });
 */}
 ```
 
-### 4. Drive a change and watch the UI update
+{/* TODO: confirm iii-stream default port from docs/workers/iii-stream.mdx
+    (sample shows 3112) */}
 
-Write to state from the CLI:
+### 4. Drive a change
+
+Trigger an order update from anywhere:
 
 ```bash
-iii state set orders/o_123 '{"status":"paid","total":4200}'
+iii trigger --function-id=stream::set --payload='{
+  "stream":"orders","group":"global","id":"o_123",
+  "data":{"status":"paid","total":4200}
+}'
 ```
 
-{/* TODO: confirm exact CLI for state writes */}
-
-The browser dashboard updates within milliseconds.
+The browser updates within milliseconds, and the persisted value is
+available the next time a client subscribes (replay from the adapter).
 
 ## Result
 
-You have a real-time UI without a WebSocket server, without a pub/sub
-broker, and without any reconnection logic of your own. The state
-trigger fans out automatically; the browser SDK handles transport and
-reconnect.
+A real-time UI without a WebSocket server, without a pub/sub broker,
+without a state-trigger middleman, and with persistence built in. One
+worker added; one function call to publish.
 
 ## What you just composed
 
 ```mermaid
 graph LR
-  Anywhere[any worker / CLI] -->|state write| State[iii-state]
-  State -->|state-trigger| OnChange[orders::on-change]
-  OnChange -->|publish| Stream[iii-stream: orders.live]
-  Stream -->|WebSocket| Browser[browser SDK]
-  Browser --> UI[live dashboard]
+  Anywhere[any worker / CLI] -->|stream::set| Stream[iii-stream]
+  Stream -->|persist| Store[(adapter)]
+  Stream -->|push| Browser[browser SDK]
+  Stream -.->|fire| Triggers[stream triggers]
+  Browser --> UI[live page]
 ```
 
 ## Next steps
 
-- Move on to [Track 3](/tutorials/expose-functions-as-mcp-tools) and
-  start using iii as an agent substrate.
+- [Track 3 — iii for AI agents](/tutorials/expose-functions-as-mcp-tools)
 - [How-to: Stream realtime data](/how-to/stream-realtime-data)
 - [How-to: Use iii in the browser](/how-to/use-iii-in-the-browser)
-- [Reference: iii-stream](/workers/iii-stream)
+- [Reference: iii-stream](/workers/iii-stream) for groups, adapters,
+  and trigger config.

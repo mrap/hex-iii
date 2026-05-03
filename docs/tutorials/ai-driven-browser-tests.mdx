@@ -11,18 +11,19 @@ description: 'Add the proof worker to generate and run Playwright browser tests 
 
 A continuous browser-test loop that:
 
-1. Watches diffs in your repo.
+1. Diffs recent changes in your repo.
 2. Asks an LLM what user-visible behavior likely changed.
 3. Generates a Playwright plan for those flows.
 4. Runs the plan against a running version of your app.
 5. Reports failures back through `iii-observability`.
 
-You do this by adding one worker — `proof` — and pointing it at your
-app.
+You do this by adding one worker — `proof`
+([source](https://github.com/iii-hq/workers/tree/main/proof)) — and
+pointing it at your app.
 
 ## Prerequisites
 
-- iii engine running.
+- Engine running locally.
 - A web app you can run locally (e.g. the dashboard from
   [Tutorial 6](/tutorials/realtime-dashboard)).
 - An LLM API key configured for `proof`.
@@ -35,39 +36,49 @@ app.
 iii worker add proof
 ```
 
-{/* TODO: confirm whether proof requires Playwright browsers to be installed separately, or installs on first run */}
+{/* TODO: confirm whether proof requires Playwright browsers to be
+    installed separately (`npx playwright install`) or installs them on
+    first run. */}
 
 ### 2. Configure the target app
 
+{/* TODO: confirm proof's config schema. Outline:
+    - target_url
+    - diff source (git base ref)
+    - llm provider + model
+    - playwright config overrides */}
+
 ```yaml
-{/* TODO: real proof config:
-   target_url: http://localhost:3000
-   diff_source: git
-   llm: { provider: openai, model: ... }
+{/* TODO: real proof worker config block */}
+```
+
+### 3. Run a test pass against a diff
+
+{/* TODO: confirm the actual function ids and trigger types proof
+    registers. The README describes "diffs changes, generates test
+    plans, drives Playwright" — verify whether this is invoked via:
+    - a registered iii function (e.g. `proof::run`)
+    - a CLI command
+    - a webhook / HTTP trigger
+    Update with the verified surface. */}
+
+```bash
+{/* TODO: real invocation, e.g.:
+   iii trigger --function-id=proof::run --payload='{"base":"main","head":"HEAD"}'
 */}
 ```
 
-### 3. Trigger a test run from a diff
+`proof` will diff `main..HEAD`, ask the LLM which user flows could be
+affected, generate a Playwright plan, execute it, and emit pass/fail
+spans visible in `iii-observability`.
 
-```bash
-iii trigger proof::run --data '{"base":"main","head":"HEAD"}'
-```
+### 4. Wire it into PRs (optional)
 
-{/* TODO: confirm proof's actual function id and trigger payload shape */}
+Trigger `proof` on every PR by:
 
-`proof` will:
-
-- Diff `main..HEAD`.
-- Ask the LLM which user flows could be affected.
-- Generate a Playwright plan.
-- Execute it against `target_url`.
-- Emit pass/fail spans visible in the console.
-
-### 4. Wire it to PRs (optional)
-
-Use a GitHub Action to invoke `proof::run` on every PR via the
-[CLI trigger flow](/how-to/trigger-functions-from-cli) or via the
-`iii-http` worker behind a webhook URL.
+- Calling its function from a GitHub Action that uses
+  [`iii trigger`](/how-to/trigger-functions-from-cli), or
+- Pointing a webhook at an `iii-http` endpoint that fans out to it.
 
 ## Result
 
@@ -89,7 +100,6 @@ graph LR
 ## Next steps
 
 - [Tutorial 10 — Durable agent memory](/tutorials/durable-agent-memory)
-- [Reference: proof worker](https://github.com/iii-hq/workers/tree/main/proof)
-  on GitHub.
+- [proof on GitHub](https://github.com/iii-hq/workers/tree/main/proof)
 - [How-to: Observability and logs](/how-to/observability-and-logs) for
   consuming proof's traces.

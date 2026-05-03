@@ -1,103 +1,132 @@
 ---
-title: 'CRUD API in 10 minutes'
-description: 'Add the todo-worker, expose it over HTTP, and have a persistent REST API running without writing a server.'
+title: 'Build your first CRUD worker'
+description: 'Read todo-worker as a reference sample, then write your own CRUD worker that uses iii-state for persistence and iii-http for routing.'
 ---
 
 <Info title="Track 1 — Your first useful backend">
-  This is tutorial **1 of 3** in Track 1. Estimated time: 10 minutes.
+  This is tutorial **1 of 3** in Track 1. Estimated time: 25 minutes.
 </Info>
 
 ## What you'll build
 
-A working REST API for a todo list — `GET /todos`, `POST /todos`,
-`PATCH /todos/:id`, `DELETE /todos/:id` — with persistent state, **without
-writing any HTTP server code yourself**. You compose two registered workers:
+A CRUD worker for a domain you care about (this tutorial uses **notes**;
+swap in whatever you want). You'll:
 
-- `todo-worker` — provides the CRUD functions and persistence.
-- `iii-http` — exposes those functions as HTTP routes.
+1. Read [`todo-worker`](https://github.com/iii-hq/workers/tree/main/todo-worker)
+   as a reference — it shows the shape of a CRUD worker against `iii-state`.
+2. Write your own worker that registers `notes::list`, `notes::create`,
+   `notes::update`, `notes::delete`.
+3. Add `iii-state` for persistence and `iii-http` for routing.
+
+<Note>
+  `todo-worker` in the registry is a **sample** to learn from, not a
+  drop-in CRUD service. The point of iii is that *you* write the
+  Functions; this tutorial shows you the pattern.
+</Note>
 
 ## Prerequisites
 
-- iii engine running locally ([Install](/install)).
-- The `iii` CLI on your `PATH`.
-- An empty project directory.
+- Engine running locally ([Install](/install)).
+- You completed the [Quickstart](/quickstart).
 
 ## Steps
 
-### 1. Initialize the project
-
-{/* TODO: confirm the exact `iii init` / scaffold command for an empty workspace */}
+### 1. Read the reference sample
 
 ```bash
-mkdir my-todo-api && cd my-todo-api
+git clone https://github.com/iii-hq/workers
+cd workers/todo-worker
+```
+
+Skim the worker source. Notice the shape:
+
+- One `iii.registerFunction(id, handler)` call per CRUD operation.
+- Handlers use `iii.trigger({ function_id: 'state::get' | 'state::set' | 'state::list' })` for storage.
+- HTTP triggers are declared with `iii.registerTrigger({ type: 'http', ... })`.
+
+{/* TODO: link to the exact files / line ranges in todo-worker that
+    illustrate each of these — list/create/update/delete handlers and
+    the HTTP trigger block. */}
+
+### 2. Scaffold your own worker
+
+In a new project directory:
+
+```bash
 iii init
+iii worker add ./workers/notes-worker
 ```
 
-### 2. Add the todo worker
+{/* TODO: confirm the exact `iii init` and `iii worker add ./path` flow
+    against the current CLI. Quickstart shows `iii create --template`. */}
+
+### 3. Add the workers your CRUD needs
 
 ```bash
-iii worker add todo-worker
-```
-
-{/* TODO: sample expected output — registered functions list (todos::list, todos::create, todos::update, todos::delete) */}
-
-### 3. Add the HTTP worker
-
-```bash
+iii worker add iii-state
 iii worker add iii-http
 ```
 
-{/* TODO: confirm whether iii-http is auto-added by `iii init` or must be added explicitly */}
+### 4. Register the CRUD functions
 
-### 4. Wire HTTP triggers to todo functions
+In `workers/notes-worker/src/worker.ts`:
 
-Create `triggers/todos.yaml`:
-
-```yaml
-{/* TODO: real YAML once trigger-config schema is locked.
-   Should map:
-     POST   /todos       → todos::create
-     GET    /todos       → todos::list
-     PATCH  /todos/:id   → todos::update
-     DELETE /todos/:id   → todos::delete
+```ts
+{/* TODO: real TS skeleton matching todo-worker's pattern:
+   iii.registerFunction('notes::list', async () => {
+     return await iii.trigger({ function_id: 'state::list', payload: { scope: 'notes' } });
+   });
+   iii.registerFunction('notes::create', async ({ body }) => {
+     const id = crypto.randomUUID();
+     await iii.trigger({ function_id: 'state::set', payload: { scope: 'notes', key: id, value: body } });
+     return { id, ...body };
+   });
+   // ... update, delete
 */}
 ```
 
-### 5. Start the engine and exercise the API
+### 5. Bind HTTP triggers
 
-```bash
-iii --config config.yaml
+```ts
+{/* TODO: registerTrigger blocks for:
+     POST   /notes        → notes::create
+     GET    /notes        → notes::list
+     PATCH  /notes/:id    → notes::update
+     DELETE /notes/:id    → notes::delete
+   Use api_path with leading slash. */}
 ```
 
-In another terminal:
+### 6. Run it
 
 ```bash
-curl -X POST http://localhost:PORT/todos -d '{"title":"buy milk"}'
-curl http://localhost:PORT/todos
+curl -X POST http://localhost:3111/notes \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"buy milk"}'
+
+curl http://localhost:3111/notes
 ```
 
-{/* TODO: real default HTTP port from iii-http worker manifest */}
+{/* TODO: confirm iii-http default port; quickstart shows 3111 */}
 
 ## Result
 
-You now have a persistent REST API. No Express, no FastAPI, no database
-client written by you. The `todo-worker` brought the functions and storage;
-`iii-http` brought the routing.
+You wrote a worker — not installed someone else's. You learned the
+"register a function per operation, persist via `state::set`, expose via
+HTTP triggers" pattern that every other iii worker follows.
 
 ## What you just composed
 
 ```mermaid
 graph LR
-  Client[curl / browser] -->|HTTP| HTTP[iii-http worker]
+  Client[curl / browser] -->|HTTP| HTTP[iii-http]
   HTTP -->|invoke| Engine[iii engine]
-  Engine -->|dispatch| Todo[todo-worker]
-  Todo -->|read/write| State[(state)]
+  Engine -->|dispatch| Notes[your notes-worker]
+  Notes -->|state::get/set/list| State[iii-state]
 ```
 
 ## Next steps
 
-- [Tutorial 2 — Add image uploads](/tutorials/add-image-uploads): compose
-  `image-resize` into the same app.
-- [How-to: Expose an HTTP endpoint](/how-to/expose-http-endpoint) for
-  custom routes.
-- [Reference: iii-http](/workers/iii-http) for the full trigger config.
+- [Tutorial 2 — Resize images on the way through](/tutorials/add-image-uploads)
+- [How-to: Use functions and triggers](/how-to/use-functions-and-triggers)
+- [Reference: iii-state](/workers/iii-state) and
+  [iii-http](/workers/iii-http).

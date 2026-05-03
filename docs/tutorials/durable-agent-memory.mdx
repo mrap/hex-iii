@@ -12,10 +12,10 @@ description: 'Combine iii-state and iii-cron to give an agent persistent memory,
 
 A long-running agent that:
 
-- Stores facts and observations in `iii-state` (durable memory).
+- Stores observations in `iii-state` (durable memory).
 - Wakes up on a cron schedule to **reflect** — summarize recent
   observations, prune low-value memories, decide what to do next.
-- Can take action autonomously by invoking other iii functions.
+- Acts autonomously by invoking other iii functions.
 
 This is the substrate pattern for "always-on" agents: assistants that
 keep working between user messages.
@@ -24,11 +24,18 @@ keep working between user messages.
 
 - Completed [Tutorial 8](/tutorials/build-a-tool-using-agent) (or
   another working agent worker).
-- `iii-state`, `iii-cron`, and `iii-observability` registered.
 
 ## Steps
 
-### 1. Model agent memory in iii-state
+### 1. Add the supporting workers
+
+```bash
+iii worker add iii-state
+iii worker add iii-cron
+iii worker add iii-observability
+```
+
+### 2. Model agent memory in iii-state
 
 Pick a keyspace layout. A simple split:
 
@@ -39,64 +46,79 @@ Pick a keyspace layout. A simple split:
 | `agents/{id}/summary` | Compacted long-term summary |
 | `agents/{id}/inbox/{ulid}` | Pending messages / events to react to |
 
-{/* TODO: code stub showing iii-state writes for an observation:
-   await iii.state.set(`agents/${id}/memory/${ulid()}`, { ts, source, text });
-*/}
-
-### 2. Register the reflection function
-
-Register `agent::reflect`. Inside:
-
-1. List recent `memory/*` and `inbox/*` entries.
-2. Call the LLM with the existing `summary` + recent items to produce
-   an updated summary and an action list.
-3. Persist the new summary.
-4. For each action, invoke the relevant iii function.
-
-{/* TODO: code skeleton for the reflect handler */}
-
-### 3. Schedule reflection with cron
-
-```yaml
-{/* TODO: cron trigger config — every 10 minutes for example, bound to agent::reflect
-   { type: cron, function_id: agent::reflect, config: { expression: "0 */10 * * * * *" } }
+```ts
+{/* TODO: skeleton for appending an observation:
+   await iii.trigger({
+     function_id: 'state::set',
+     payload: {
+       scope: `agents/${id}/memory`,
+       key: ulid(),
+       value: { ts: Date.now(), source, text },
+     },
+   });
 */}
 ```
 
-### 4. Feed the agent
+### 3. Register the reflection function
+
+```ts
+{/* TODO: code skeleton for agent::reflect handler:
+   1. List state under agents/{id}/memory and agents/{id}/inbox
+   2. Read the existing summary
+   3. Call the LLM with summary + recent items, asking for an updated
+      summary and an action list
+   4. Persist the new summary
+   5. For each action, iii.trigger() the relevant function
+*/}
+```
+
+### 4. Schedule reflection
+
+```ts
+{/* TODO: registerTrigger:
+   iii.registerTrigger({
+     type: 'cron',
+     function_id: 'agent::reflect',
+     config: { expression: '0 *\/10 * * * * *' }, // every 10 minutes
+   });
+*/}
+```
+
+### 5. Feed the agent
 
 Have other workers or external systems append to the agent's inbox:
 
 ```bash
-iii state set agents/a1/inbox/$(ulid) '{"source":"slack","text":"new ticket #123"}'
+iii trigger --function-id=state::set --payload='{
+  "scope":"agents/a1/inbox","key":"<ulid>",
+  "value":{"source":"slack","text":"new ticket #123"}
+}'
 ```
 
-The next reflection tick will incorporate the message and decide what
-to do.
+The next reflection tick incorporates the message and decides what to
+do with it.
 
-### 5. Watch it think
+### 6. Watch it think
 
-In the console, every reflection tick produces a trace:
-`cron:tick → agent::reflect → (LLM) → tool calls`. Use
-`iii-observability` to see what the agent is doing and how often.
+In the iii console, every reflection tick produces a trace:
+`cron:tick → agent::reflect → (LLM) → tool calls`.
 
 ## Result
 
-You have an autonomous agent with durable memory and a heartbeat. It
-keeps state across restarts (memory lives in `iii-state`), it acts
-without needing a user prompt (cron drives it), and every action is
-observable.
+An autonomous agent with durable memory and a heartbeat. State persists
+across restarts (it lives in `iii-state`), it acts without needing a
+user prompt (cron drives it), and every action is observable.
 
 ## What you just composed
 
 ```mermaid
 graph TB
   Cron[iii-cron: every 10m] --> Reflect[agent::reflect]
-  Reflect -->|read| State[(iii-state: memory + inbox + summary)]
+  Reflect -->|state::list/get| State[(iii-state: memory + inbox + summary)]
   Reflect -->|LLM| LLM[provider]
-  Reflect -->|write summary| State
+  Reflect -->|state::set summary| State
   Reflect -->|invoke tools| Tools[other iii functions]
-  External[other workers / users] -->|append inbox| State
+  External[other workers / users] -->|state::set inbox| State
   All[everything] -.->|spans| Obs[iii-observability]
 ```
 

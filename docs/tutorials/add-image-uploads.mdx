@@ -1,83 +1,113 @@
 ---
-title: 'Add image uploads'
-description: 'Compose the image-resize worker into your todo app and learn how iii channels move binary data between workers.'
+title: 'Resize images on the way through'
+description: 'Add the image-resize worker and learn how iii channels move binary data between workers without bloating function payloads.'
 ---
 
 <Info title="Track 1 — Your first useful backend">
-  This is tutorial **2 of 3** in Track 1. Estimated time: 15 minutes.
-  Builds on [Tutorial 1](/tutorials/crud-api-in-10-minutes).
+  This is tutorial **2 of 3** in Track 1. Estimated time: 20 minutes.
+  Independent of Tutorial 1 — you can do them in any order.
 </Info>
 
 ## What you'll build
 
-Extend the todo API from Tutorial 1 so each todo can have an attached
-thumbnail. You'll add `image-resize` (a Rust worker that does
-EXIF-correct JPEG/PNG/WebP resizing) and stream binary data between
-workers using **channels**.
+An HTTP endpoint that accepts an image upload, resizes it via the
+[`image-resize`](https://github.com/iii-hq/workers/tree/main/image-resize)
+worker, and returns the resized bytes. You'll learn how **channels** move
+binary payloads between workers.
 
 ## Prerequisites
 
-- Completed [Tutorial 1](/tutorials/crud-api-in-10-minutes).
-- Engine running with `todo-worker` and `iii-http` already added.
+- Engine running locally.
+- Familiarity with `iii.registerFunction` from the
+  [Quickstart](/quickstart).
 
 ## Steps
 
-### 1. Add the image-resize worker
+### 1. Add the workers
 
 ```bash
+iii worker add iii-http
 iii worker add image-resize
 ```
 
-{/* TODO: confirm registered function ids — likely `image::resize` with channel I/O for input/output */}
+`image-resize` is a Rust worker that does EXIF-correct JPEG/PNG/WebP
+resizing — scale-to-fit and crop-to-fit.
 
-### 2. Add a multipart upload route
+### 2. Read what image-resize exposes
 
-Wire a new HTTP trigger that accepts a file and forwards it to the
-resizer over a channel.
+{/* TODO: confirm exact function id(s) registered by image-resize.
+    Likely shape: a function that accepts an input channel of bytes,
+    a target width/height/mode, and writes resized bytes to an output
+    channel. Verify against
+    https://github.com/iii-hq/workers/tree/main/image-resize
+    and link to the registered ids. */}
 
-```yaml
-{/* TODO: real HTTP trigger config for multipart upload + channel binding to image::resize */}
+### 3. Write a thin glue worker
+
+Register one function `images::resize-upload` that:
+
+1. Receives an HTTP multipart upload (the iii-http payload exposes the
+   request body / file bytes).
+2. Opens an input channel and writes the upload bytes into it.
+3. Invokes the image-resize function with the channel handle and target
+   dimensions.
+4. Reads the output channel and returns the resized bytes in the HTTP
+   response.
+
+```ts
+{/* TODO: real TS skeleton — see how-to/use-channels for the channel API.
+    Outline:
+      iii.registerFunction('images::resize-upload', async ({ body }) => {
+        const inCh  = await iii.channels.create();
+        const outCh = await iii.channels.create();
+        await inCh.write(body.file);
+        await inCh.close();
+        await iii.trigger({
+          function_id: '<image-resize function id>',
+          payload: { input: inCh.id, output: outCh.id, width: 256, height: 256, mode: 'fit' },
+        });
+        const bytes = await outCh.readAll();
+        return { status_code: 200, body: bytes, headers: { 'Content-Type': 'image/jpeg' } };
+      });
+*/}
 ```
 
-### 3. Pipe the resized output into todo state
+### 4. Bind the HTTP trigger
 
-Register a small glue function (TypeScript or Python) that:
+```ts
+{/* TODO: registerTrigger({ type: 'http', function_id: 'images::resize-upload',
+   config: { api_path: '/images/resize', http_method: 'POST' } }); */}
+```
 
-1. Reads the resized bytes from the output channel.
-2. Calls `todos::update` with a `thumbnail` field (base64 or storage ref).
-
-{/* TODO: code stub — TS handler signature using channels API; reference how-to/use-channels */}
-
-### 4. Try it end-to-end
+### 5. Try it
 
 ```bash
-curl -X POST http://localhost:PORT/todos/:id/thumbnail \
-  -F 'image=@./photo.jpg'
+curl -X POST http://localhost:3111/images/resize \
+  -F 'file=@./photo.jpg' \
+  -o resized.jpg
 ```
 
-Then `GET /todos/:id` and confirm a `thumbnail` field is present.
+{/* TODO: confirm iii-http default port and multipart body shape */}
 
 ## Result
 
-You added a heavyweight image processing capability without writing image
-code, without choosing a library, and without spinning up a separate
-service. The resizer runs as just another worker. Channels carry the
-binary payload without bloating function arguments.
+You added image processing to your backend without choosing a library,
+writing image code, or operating a separate service. The binary payload
+moved through channels, not as a giant function argument.
 
 ## What you just composed
 
 ```mermaid
 graph LR
   Client -->|multipart POST| HTTP[iii-http]
-  HTTP -->|channel: bytes in| Resize[image-resize worker]
-  Resize -->|channel: bytes out| Glue[glue function]
-  Glue -->|todos::update| Todo[todo-worker]
-  Todo --> State[(state)]
+  HTTP --> Glue[images::resize-upload]
+  Glue -->|channel: bytes in| Resize[image-resize worker]
+  Resize -->|channel: bytes out| Glue
+  Glue -->|HTTP body| Client
 ```
 
 ## Next steps
 
-- [Tutorial 3 — Scheduled jobs and observability](/tutorials/scheduled-jobs-and-observability)
-- [How-to: Use channels](/how-to/use-channels) for the channel API.
-- [Reference: image-resize](https://github.com/iii-hq/workers/tree/main/image-resize)
-  on GitHub.
+- [Tutorial 3 — Schedule recurring work and trace it](/tutorials/scheduled-jobs-and-observability)
+- [How-to: Use channels](/how-to/use-channels) for the full channel API.
+- [image-resize on GitHub](https://github.com/iii-hq/workers/tree/main/image-resize)

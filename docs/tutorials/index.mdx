@@ -17,20 +17,21 @@ tutorials build on each other.
 
 ### Track 1 — Your first useful backend
 
-For solo developers and early-stage builders. Goal: a real backend running
-in under 30 minutes without writing infra glue.
+For solo developers and early-stage builders. Goal: write a worker, add
+a couple of supporting workers, and run a backend you actually use.
 
 <CardGroup cols={2}>
-  <Card title="1. CRUD API in 10 minutes" href="/tutorials/crud-api-in-10-minutes" icon="database">
-    Add `todo-worker` and `iii-http`, get a persistent REST API with no
-    server code.
+  <Card title="1. Build your first CRUD worker" href="/tutorials/crud-api-in-10-minutes" icon="database">
+    Read `todo-worker` as a sample, then write your own CRUD worker
+    using `iii-state` and `iii-http`.
   </Card>
-  <Card title="2. Add image uploads" href="/tutorials/add-image-uploads" icon="image">
-    Compose `image-resize` with the todo app via channels.
+  <Card title="2. Resize images on the way through" href="/tutorials/add-image-uploads" icon="image">
+    Add `image-resize` and stream binary data between workers using
+    channels.
   </Card>
-  <Card title="3. Scheduled jobs and observability" href="/tutorials/scheduled-jobs-and-observability" icon="clock">
-    Cron-trigger a cleanup over state and watch the trace in
-    `iii-observability`.
+  <Card title="3. Schedule recurring work and trace it" href="/tutorials/scheduled-jobs-and-observability" icon="clock">
+    Add `iii-cron` to fire a function on a schedule, then watch the
+    trace in `iii-observability`.
   </Card>
 </CardGroup>
 
@@ -40,15 +41,17 @@ For teams with an existing stack. Goal: slot iii in one capability at a
 time, without rewriting your services.
 
 <CardGroup cols={2}>
-  <Card title="4. Bridge an existing HTTP API" href="/tutorials/bridge-existing-api" icon="bridge">
-    Wrap a legacy service with `iii-bridge` and add retry semantics.
+  <Card title="4. Wrap an external HTTP API as a function" href="/tutorials/bridge-existing-api" icon="link">
+    Use `registerFunction` with an `HttpInvocationConfig` to make a
+    third-party REST endpoint callable as a regular iii function.
   </Card>
-  <Card title="5. Background jobs without a job runner" href="/tutorials/background-jobs-without-a-runner" icon="list-check">
-    Replace Sidekiq / BullMQ / Celery for the simple case with `iii-queue`.
+  <Card title="5. Background jobs with iii-queue" href="/tutorials/background-jobs-without-a-runner" icon="list-check">
+    Add `iii-queue` for retries, backoff, concurrency, and a
+    dead-letter queue.
   </Card>
-  <Card title="6. Real-time dashboard" href="/tutorials/realtime-dashboard" icon="chart-line">
-    Push live state changes to a browser with `iii-stream` and the browser
-    SDK.
+  <Card title="6. Push live updates with iii-stream" href="/tutorials/realtime-dashboard" icon="chart-line">
+    Use `stream::set` to persist, broadcast, and react in one call;
+    subscribe from the browser SDK.
   </Card>
 </CardGroup>
 
@@ -59,19 +62,19 @@ agents — tools, memory, scheduling, streaming.
 
 <CardGroup cols={2}>
   <Card title="7. Expose your functions as MCP tools" href="/tutorials/expose-functions-as-mcp-tools" icon="plug">
-    Add the `mcp` worker and turn every tagged iii function into an agent
-    tool.
+    Add the `mcp` worker so any MCP-compatible client (Claude, Cursor,
+    Codex) can call your iii functions as tools.
   </Card>
   <Card title="8. Build a tool-using agent worker" href="/tutorials/build-a-tool-using-agent" icon="robot">
-    Register an LLM-backed function that calls other iii functions and
-    streams tokens back.
+    Write a worker that calls an LLM, invokes other iii functions as
+    tools, and streams tokens back.
   </Card>
   <Card title="9. AI-driven browser tests" href="/tutorials/ai-driven-browser-tests" icon="flask">
     Add `proof` and let it generate Playwright plans against your app.
   </Card>
   <Card title="10. Durable agent memory" href="/tutorials/durable-agent-memory" icon="brain">
-    Combine `iii-state` and `iii-cron` to give an agent persistent memory
-    and scheduled reflection.
+    Combine `iii-state` and `iii-cron` to give an agent persistent
+    memory and scheduled reflection.
   </Card>
 </CardGroup>
 
