@@ -1,24 +1,40 @@
 ---
 title: 'Primitives: Functions, Triggers, and Workers'
-description: 'Functions, Triggers, and Workers are how code gets defined, executed, and managed in a iii powered backend'
+description: 'Understanding why iii models backends with three primitives: Functions, Triggers, and Workers.'
 ---
 
-iii is built upon three core primitives: Functions, Triggers, and Workers.
+iii models every backend system with three primitives: **Function**, **Trigger**, and **Worker**. This design choice has specific motivations.
 
-A **Function** is anything that can be triggered to do work; it receives input, and optionally returns output.
-It can exist anywhere be it locally, on cloud, on serverless, or even as a 3rd party HTTP endpoint. It can mutate state,
-invoke other functions, modify databases, and do anything that a typical function can do. 
-All application level Functions are treated the same within iii. 
+## Why Three Primitives?
 
-A **Trigger** is what causes a Function to run — either explicitly from code, or automatically from an event source
-like an HTTP request or cron job.
+Traditional backend architectures require developers to learn different abstractions for each concern: HTTP handlers, queue consumers, cron jobs, event listeners, and serverless functions all have distinct APIs and mental models. When these systems need to interact, developers must write glue code and manage cross-system concerns manually.
 
-A **Worker** is any process that can register Functions and Triggers to run one or more tasks. They are typically
-long running processes but can also be ephemeral processes, an agentic worker, or a legacy system leveraging middleware.
+iii collapses this complexity by treating all executable code as Functions, all event sources as Triggers, and all processes as Workers. The engine handles routing, discovery, and coordination.
 
-<Info title="Uncontrolled Endpoints">
-iii's Functions are not magic. While uncontrolled 3rd party HTTP endpoints can be represented as Functions they won't have
-the same access to invocation, state, and other engine functionality as other Functions do.
+## Function
+
+A **Function** is any unit of work that can be invoked. It receives input, performs computation, and optionally returns output.
+
+Functions can run anywhere: locally, in the cloud, in a container, or as a third-party HTTP endpoint wrapped with iii's HTTP invocation config. The key insight is that from the engine's perspective, all functions are equivalent — they receive data, they return data, and they can invoke other functions.
+
+This uniformity means you can swap implementations without changing callers. A function that starts as local code can become a Lambda, then a dedicated service, then a third-party API — all without modifying the functions that call it.
+
+## Trigger
+
+A **Trigger** binds an event source to a Function. When the event fires, the engine invokes the function.
+
+Triggers separate the "what happens" (the function) from "when it happens" (the trigger). This separation allows the same function to respond to multiple event types: an `orders::process` function might be triggered by an HTTP POST, a queue message, or a cron schedule. The function implementation stays the same.
+
+Built-in trigger types include HTTP, cron, queue, state changes, and streams. You can also register custom trigger types for domain-specific events.
+
+## Worker
+
+A **Worker** is a process that registers Functions and Triggers with the engine. Workers connect via WebSocket and remain connected for their lifetime.
+
+Workers can be long-running services, ephemeral scripts, or anything in between. Multiple workers can register the same function ID — the engine load-balances invocations across them. This design supports horizontal scaling without explicit configuration.
+
+<Info title="Third-Party Endpoints">
+External HTTP endpoints can be registered as Functions using `HttpInvocationConfig`, but they won't have access to engine features like state or channels. The engine makes HTTP calls on their behalf but cannot extend their runtime behavior.
 </Info>
 
 ## Architecture

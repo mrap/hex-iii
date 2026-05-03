@@ -11,33 +11,20 @@ Each system brings its own setup, its own deployment, and its own
 failure modes. Balancing infrastructure and business logic becomes increasingly difficult
 with every new system.
 
-The result of balancing these many necessary systems are delayed delivery, difficulty debugging,
-transient issues, increased expenses, siloed domain and systems knowledge, and difficulty with
-onboarding new developers and AI agents.
+Each system brings its own setup, deployment, and failure modes. Coordinating them becomes increasingly complex.
 
-The main benefit of iii is that it transforms a backend from behaving like a series of
-separate concerns, domains, and services into a single application-level interface across services.
+**iii** (pronounced "three eye") provides a single integration point for these backend systems. It exposes a unified interface across services, centralizes configuration, and provides cross-system observability.
 
-**iii** (pronounced "three eye") does this by creating a single integration point
-for all backend systems which results in a stack that is easier to change and which
-keeps all historical knowledge in one place (ie. a single config).
+## Key Capabilities
 
-The result is faster onboarding of new developers and AI agents, and simpler debugging across systems,
-removal of cost centers with reduced switching costs, and faster delivery of backend features.
-
-## What makes iii different
-
-iii's primitives produce an execution model and live system traits that together make it
-unreasonably good at creating backend software.
-
-| | What it means |
+| Capability | Description |
 | --- | --- |
 | **Durable orchestration** | Coordinate long-running, failure-tolerant execution across workers and triggers. |
-| **Interoperable execution** | Execute across languages natively as if it were one runtime. |
-| **Simple primitives** | Collapse distributed backend design into a paradigm that humans and agents can reason about. |
-| **Live discovery** | Functions and triggers exposed by one worker become visible and usable across the system in real time. |
-| **Live extensibility** | Add new workers and capabilities to a live iii system without redesigning the architecture. |
-| **Live observability** | Observe operations, traces, and system behavior across the entire connected stack in real time. |
+| **Interoperable execution** | Execute across languages (TypeScript, Python, Rust) as if they were one runtime. |
+| **Simple primitives** | Three concepts (Function, Trigger, Worker) model any distributed backend pattern. |
+| **Live discovery** | Functions and triggers exposed by one worker become callable across the system immediately. |
+| **Live extensibility** | Add new workers and capabilities to a running system without restarts or config updates. |
+| **Live observability** | Traces and logs flow across the entire connected stack in real time. |
 
 ## How iii achieves this
 
