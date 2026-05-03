@@ -176,6 +176,18 @@ workers:
   #         remote_function: state::get
   #         timeout_ms: 5000
 
+  # The worker manager (iii-worker-manager) is loaded automatically and
+  # accepts WebSocket connections from SDK workers. Override the inbound
+  # message ceiling here when you need to lift it for very large direct
+  # invocations; for streamable or > 16 MiB payloads, prefer channels.
+  # - name: iii-worker-manager
+  #   config:
+  #     # 16 MiB is the default; increase if you have a use case for
+  #     # larger single-message invocations. Workers exceeding this
+  #     # limit are disconnected and any in-flight invocations on that
+  #     # connection resolve with `invocation_failed_payload_too_large`.
+  #     max_message_size: 16777216
+
   # Ephemeral sandboxes (VMs booted on demand from OCI rootfs images).
   # Run `iii worker add iii-sandbox` to append the block below automatically,
   # or uncomment and restart the engine. The daemon ships inside the

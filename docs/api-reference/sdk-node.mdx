@@ -524,6 +524,7 @@ Configuration options passed to registerWorker.
 | `enableMetricsReporting` | `boolean` | No | Enable worker metrics via OpenTelemetry. Defaults to `true`. |
 | `headers` | `Record<string, string>` | No | Custom HTTP headers sent during the WebSocket handshake. |
 | `invocationTimeoutMs` | `number` | No | Default timeout for `trigger()` in milliseconds. Defaults to `30000`. |
+| `maxMessageSize` | `number` | No | Maximum size in bytes for a single outbound WebSocket message. Defaults to `16777216` (16 MiB), matching the engine. The producer-side guard throws `IIIPayloadTooLarge` before sending if a serialized message would exceed this limit; for streamable payloads see [Use Channels](/how-to/use-channels) and the [`invocation_failed_payload_too_large`](/api-reference/error-codes#invocation_failed_payload_too_large) error code. |
 | `otel` | Omit&lt;[`OtelConfig`](#otelconfig), "engineWsUrl"&gt; | No | OpenTelemetry configuration. OTel is initialized automatically by default.<br />Set `{ enabled: false }` or env `OTEL_ENABLED=false/0/no/off` to disable.<br />The `engineWsUrl` is set automatically from the III address. |
 | `reconnectionConfig` | Partial&lt;[`IIIReconnectionConfig`](#iiireconnectionconfig)&gt; | No | WebSocket reconnection behavior. |
 | `workerName` | `string` | No | Display name for this worker. Defaults to `hostname:pid`. |

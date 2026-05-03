@@ -66,7 +66,9 @@ Channels solve all of these by giving each side a real stream backed by the engi
 | Passing a config object to another function | No | Put it in the `trigger()` payload directly |
 | Fire-and-forget notifications | No | Use `TriggerAction.Void()` or a queue instead |
 
-**Rule of thumb:** if your data is small enough to fit comfortably in a JSON payload (< 1 MB) and you don't need incremental delivery, use a regular `trigger()` call. Use channels when you need streaming, binary data, or when the payload is too large to serialize at once.
+**Rule of thumb:** direct `trigger()` payloads ride a single WebSocket message. The default ceiling is **16 MiB** (engine-enforced; SDKs default to the same value). Remember that base64 inflates binary by ~33% and the JSON envelope adds another ~10%, so a 12 MiB raw blob lands close to the limit. For larger or streamable payloads, use channels.
+
+If you cross the limit you get [`invocation_failed_payload_too_large`](/api-reference/error-codes#invocation_failed_payload_too_large) from the engine, or `IIIPayloadTooLarge` raised client-side before the round-trip.
 
 ## Steps
 

@@ -1,0 +1,144 @@
+---
+title: 'Configurable WebSocket Payload Limit'
+description: 'A consistent 16 MiB invocation payload ceiling across the engine and every SDK, with a typed error code and a producer-side guard that fails fast.'
+---
+
+## Why this change
+
+Before this release, oversized `trigger()` payloads failed in inconsistent and confusing ways. The Node and Rust SDKs used `tokio-tungstenite` defaults that quietly accepted large frames; the Python SDK silently inherited the [`websockets`](https://websockets.readthedocs.io) library's 1 MiB default and snapped at exactly that boundary. The engine had no explicit limit and surfaced any oversize-induced disconnect as the generic `invocation_stopped`, which gave callers no way to tell "worker crashed" apart from "your payload was too big."
+
+The result: Python users hit a silent 1 MiB cliff that Node and Rust users never saw, and every language's failure mode looked like a transient connection drop instead of a programming error.
+
+This release lands a single, configurable ceiling end-to-end:
+
+- The engine enforces it.
+- Every SDK defaults to the same value.
+- Producers refuse to send oversized messages locally instead of triggering a server-side disconnect.
+- A dedicated error code (`invocation_failed_payload_too_large`) lets callers branch on it.
+
+The default is **16 MiB**, large enough for almost every realistic JSON payload. For larger or streamable data, use [channels](/how-to/use-channels).
+
+---
+
+## What changed
+
+### Engine
+
+A new `max_message_size` field on the `iii-worker-manager` config sets the inbound WebSocket message ceiling. It is applied to both `WebSocketUpgrade::max_message_size` and `max_frame_size` on every worker connection.
+
+```yaml
+workers:
+  - name: iii-worker-manager
+    config:
+      # max_message_size: 16777216  # bytes; default is 16 MiB
+```
+
+When a worker exceeds the limit, the engine closes the socket and any in-flight invocation on that connection resolves with the new error code:
+
+| Code | Meaning |
+|---|---|
+| `invocation_failed_payload_too_large` | The worker sent a WebSocket message larger than `max_message_size`. Emitted by `cleanup_worker` on the failed connection. |
+| `invocation_stopped` | Unchanged — still emitted for clean disconnects, shutdown, and EOF. |
+
+WebSocket `recv` errors are now logged at `WARN` with peer / worker_id / error context, so operators can see oversize disconnects without enabling debug logging.
+
+See [Error Codes](/api-reference/error-codes) for the full table.
+
+### Python SDK
+
+```python
+from iii import register_worker, InitOptions, IIIPayloadTooLarge
+
+iii = register_worker(
+    "ws://localhost:49134",
+    InitOptions(max_message_size=16 * 1024 * 1024),
+)
+
+try:
+    iii.trigger({"function_id": "files::ingest", "payload": large_blob})
+except IIIPayloadTooLarge as e:
+    print(f"too big: {e.payload_bytes} > {e.limit_bytes}")
+```
+
+- New `InitOptions.max_message_size: int = 16 * 1024 * 1024`.
+- New `IIIPayloadTooLarge` exception (subclass of `ValueError`) carrying `payload_bytes` and `limit_bytes`, exported from the package root.
+- Producer guard runs before every WS send.
+
+### Node SDK
+
+```typescript
+import { registerWorker, IIIPayloadTooLarge } from 'iii-sdk'
+
+const iii = registerWorker(process.env.III_URL!, {
+  maxMessageSize: 16 * 1024 * 1024,
+})
+
+try {
+  await iii.trigger({ function_id: 'files::ingest', payload: largeBlob })
+} catch (e) {
+  if (e instanceof IIIPayloadTooLarge) {
+    console.error(`too big: ${e.payloadBytes} > ${e.limitBytes}`)
+  }
+}
+```
+
+- New `InitOptions.maxMessageSize?: number` (defaults to 16 MiB).
+- New `IIIPayloadTooLarge` exported class with `payloadBytes` / `limitBytes`.
+- Producer guard runs before every WS send.
+
+### Rust SDK
+
+```rust
+use iii_sdk::{register_worker, InitOptions, IIIError, DEFAULT_MAX_MESSAGE_SIZE};
+
+let iii = register_worker(
+    "ws://localhost:49134",
+    InitOptions {
+        max_message_size: Some(DEFAULT_MAX_MESSAGE_SIZE),
+        ..Default::default()
+    },
+);
+
+match iii.trigger(req).await {
+    Err(IIIError::PayloadTooLarge { actual, limit }) => {
+        eprintln!("too big: {actual} > {limit}");
+    }
+    other => { /* ... */ }
+}
+```
+
+- New `InitOptions::max_message_size: Option<usize>` plus `InitOptions::resolved_max_message_size()`.
+- `DEFAULT_MAX_MESSAGE_SIZE` constant exported from the crate root (16 MiB).
+- New `IIIError::PayloadTooLarge { actual, limit }` variant.
+- Producer guard runs before every WS send.
+
+---
+
+## Behavior change worth flagging
+
+**Python users get a 15× larger default.** Before this release, the Python SDK silently inherited the `websockets` library's 1 MiB max-message-size default, while Node and Rust effectively had no ceiling. Python callers occasionally saw mysterious `invocation_stopped` errors that turned out to be that hidden 1 MiB cap firing.
+
+After this release, the Python default is **16 MiB**, matching Node, Rust, and the engine. Payloads between 1 MiB and 16 MiB that previously failed with `invocation_stopped` will now succeed.
+
+If you were relying on the implicit 1 MiB ceiling as a safety check, set `InitOptions(max_message_size=1024 * 1024)` explicitly to preserve the old behavior — but consider switching to [channels](/how-to/use-channels) for any payload that genuinely needs to be that large.
+
+---
+
+## Sizing notes
+
+The 16 MiB default is the *serialized* WebSocket message size, not your raw application data:
+
+- **Base64** inflates binary content by ~33%.
+- The **JSON envelope** (function ID, invocation ID, headers, etc.) adds another ~10%.
+
+A 12 MiB raw blob, base64-encoded inside a JSON envelope, lands close to the 16 MiB ceiling. For anything bigger or streamable, use [channels](/how-to/use-channels) instead — they chunk over the same WebSocket without the per-message limit.
+
+---
+
+## Migration checklist
+
+- [ ] No action required for most users — the new defaults are backward-compatible with payloads under 1 MiB.
+- [ ] Python users with payloads in the 1–16 MiB range: previously failing calls will now succeed.
+- [ ] If you raise the SDK limit above 16 MiB, also raise `iii-worker-manager.max_message_size` on the engine — otherwise the local guard passes and the engine disconnects with `invocation_failed_payload_too_large`.
+- [ ] Update error handling to match on `invocation_failed_payload_too_large` (engine-side) and `IIIPayloadTooLarge` / `IIIError::PayloadTooLarge` (producer-side) where the distinction matters.
+- [ ] For payloads that consistently exceed 16 MiB, migrate to [channels](/how-to/use-channels).

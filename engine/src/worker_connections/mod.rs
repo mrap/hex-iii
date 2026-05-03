@@ -174,6 +174,22 @@ impl WorkerConnectionRegistry {
     }
 }
 
+/// Why the engine's worker recv loop tore down a worker connection.
+///
+/// Captured on the `WorkerConnection` when the engine observes a recv
+/// error so that `cleanup_worker` can pick a specific error code for the
+/// halted in-flight invocations. See `Engine::handle_worker`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisconnectReason {
+    /// The worker sent a frame that exceeded the configured
+    /// `max_message_size`. Surfaces as `invocation_failed_payload_too_large`.
+    PayloadTooLarge,
+    /// Any other recv-time tungstenite error (Io, Protocol, etc.).
+    /// Surfaces as the generic `invocation_stopped` so existing operator
+    /// alerts on that code still work for non-size disconnects.
+    Other,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum WorkerConnectionStatus {
     #[default]
@@ -224,6 +240,11 @@ pub struct WorkerConnection {
     pub pid: Option<u32>,
     pub isolation: Option<String>,
     pub session: Option<Arc<Session>>,
+    /// Set by `Engine::handle_worker` when a recv-side error tears down
+    /// the connection. Read by `cleanup_worker` to pick the error code
+    /// for in-flight invocations. `None` means the socket ended cleanly
+    /// (Close frame, shutdown signal, or end-of-stream).
+    pub disconnect_reason: Arc<RwLock<Option<DisconnectReason>>>,
 }
 
 impl WorkerConnection {
@@ -245,6 +266,7 @@ impl WorkerConnection {
             pid: None,
             isolation: None,
             session: None,
+            disconnect_reason: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -266,7 +288,16 @@ impl WorkerConnection {
             pid: None,
             isolation: None,
             session: Some(Arc::new(session)),
+            disconnect_reason: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub async fn set_disconnect_reason(&self, reason: DisconnectReason) {
+        *self.disconnect_reason.write().await = Some(reason);
+    }
+
+    pub async fn disconnect_reason(&self) -> Option<DisconnectReason> {
+        *self.disconnect_reason.read().await
     }
 
     pub async fn function_count(&self) -> usize {

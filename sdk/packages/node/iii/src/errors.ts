@@ -33,6 +33,42 @@ export class IIIInvocationError extends Error {
 }
 
 /**
+ * Producer-side guard: thrown synchronously from `trigger()` (or any other
+ * SDK send path) when the serialized invocation envelope would exceed
+ * `maxMessageSize`. The error never leaves the client — the WebSocket frame
+ * is not sent — so callers can distinguish "I asked for too much" from
+ * "the engine rejected my message" (`invocation_failed_payload_too_large`).
+ *
+ * The message format mirrors the Python SDK so cross-language tooling can
+ * grep for one canonical wording.
+ */
+export class IIIPayloadTooLarge extends Error {
+  public readonly payloadBytes: number
+  public readonly limitBytes: number
+
+  constructor(payloadBytes: number, limitBytes: number) {
+    super(
+      `Payload ${payloadBytes} bytes exceeds invocation limit ${limitBytes} bytes. ` +
+        `For binary blobs use channels: https://iii.dev/docs/how-to/use-channels`,
+    )
+    this.name = 'IIIPayloadTooLarge'
+    this.payloadBytes = payloadBytes
+    this.limitBytes = limitBytes
+  }
+}
+
+/**
+ * Throws {@link IIIPayloadTooLarge} when a serialized message would exceed
+ * the configured limit. Centralised so every send path (`trigger`, `invoke`,
+ * future producers) uses the same check and error wording.
+ */
+export function assertWithinLimit(payloadBytes: number, limitBytes: number): void {
+  if (payloadBytes > limitBytes) {
+    throw new IIIPayloadTooLarge(payloadBytes, limitBytes)
+  }
+}
+
+/**
  * True when `value` looks like the wire `ErrorBody` the engine sends in
  * `InvocationResult.error`: `{ code: string, message: string, stacktrace?: string }`.
  * Used to distinguish an engine rejection (which we wrap in

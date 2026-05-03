@@ -540,6 +540,7 @@ Options for configuring the III SDK.
 | `enable_metrics_reporting` | `bool` | No | Enable worker metrics via OpenTelemetry. Default ``True``. |
 | `headers` | `dict[str, str] \| None` | No | - |
 | `invocation_timeout_ms` | `int` | No | Default timeout for ``trigger()`` in milliseconds. Default ``30000``. |
+| `max_message_size` | `int` | No | Maximum size in bytes for a single outbound WebSocket message. Default ``16777216`` (16 MiB), matching the engine. The producer-side guard raises ``IIIPayloadTooLarge`` (subclass of ``ValueError``) before sending if a serialized message would exceed this limit; for streamable payloads see [Use Channels](/how-to/use-channels) and the [`invocation_failed_payload_too_large`](/api-reference/error-codes#invocation_failed_payload_too_large) error code. |
 | `otel` | [`OtelConfig`](#otelconfig) \| dict[str, Any] \| None | No | OpenTelemetry configuration. Enabled by default. Set ``\{'enabled': False\}`` or env ``OTEL_ENABLED=false`` to disable. |
 | `reconnection_config` | [`ReconnectionConfig`](#reconnectionconfig) \| None | No | WebSocket reconnection behavior. |
 | `telemetry` | [`TelemetryOptions`](#telemetryoptions) \| None | No | Internal telemetry metadata. |

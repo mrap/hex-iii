@@ -60,12 +60,18 @@ impl InvocationHandler {
     }
 
     pub fn halt_invocation(&self, invocation_id: &Uuid) {
-        let invocation = self.remove(invocation_id);
+        self.halt_invocation_with_reason(invocation_id, "invocation_stopped", "Invocation stopped");
+    }
 
-        if let Some(invocation) = invocation {
+    /// Halts an invocation with a specific error code/message instead of
+    /// the legacy `invocation_stopped`. Used by `cleanup_worker` to
+    /// distinguish payload-too-large disconnects from generic worker
+    /// teardowns so SDK callers can react to the specific failure mode.
+    pub fn halt_invocation_with_reason(&self, invocation_id: &Uuid, code: &str, message: &str) {
+        if let Some(invocation) = self.remove(invocation_id) {
             let _ = invocation.sender.send(Err(ErrorBody {
-                code: "invocation_stopped".into(),
-                message: "Invocation stopped".into(),
+                code: code.into(),
+                message: message.into(),
                 stacktrace: None,
             }));
         }
@@ -357,6 +363,38 @@ mod tests {
         let id = Uuid::new_v4();
         // Should not panic.
         handler.halt_invocation(&id);
+    }
+
+    #[test]
+    fn test_halt_invocation_with_reason_uses_specific_code() {
+        let handler = InvocationHandler::new();
+        let id = Uuid::new_v4();
+        let (sender, mut receiver) = oneshot::channel();
+
+        let invocation = Invocation {
+            id,
+            function_id: "test_fn".to_string(),
+            worker_id: None,
+            sender,
+            traceparent: None,
+            baggage: None,
+        };
+        handler.invocations.insert(id, invocation);
+
+        handler.halt_invocation_with_reason(
+            &id,
+            "invocation_failed_payload_too_large",
+            "Worker disconnected: WS message exceeded the configured size limit",
+        );
+
+        assert!(handler.invocations.is_empty());
+        let inner = receiver.try_recv().expect("oneshot delivered");
+        let error = inner.expect_err("invocation should be halted with an error");
+        assert_eq!(error.code, "invocation_failed_payload_too_large");
+        assert_eq!(
+            error.message,
+            "Worker disconnected: WS message exceeded the configured size limit"
+        );
     }
 
     #[test]

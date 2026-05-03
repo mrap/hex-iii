@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -26,7 +26,10 @@ use tokio::{
     sync::{mpsc, oneshot},
     time::sleep,
 };
-use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
+use tokio_tungstenite::{
+    connect_async_with_config,
+    tungstenite::{Message as WsMessage, protocol::WebSocketConfig},
+};
 use uuid::Uuid;
 
 const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -47,6 +50,16 @@ use crate::telemetry;
 use crate::telemetry::types::OtelConfig;
 
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
+/// Build a tungstenite [`WebSocketConfig`] with both the message and frame
+/// ceilings set to `max_message_size`. Used at every `connect_async_with_config`
+/// call site so the producer-side guard, the engine, and the underlying
+/// tungstenite limits all agree on one number.
+pub(crate) fn build_ws_config(max_message_size: usize) -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(max_message_size))
+        .max_frame_size(Some(max_message_size))
+}
 
 /// Worker information returned by `engine::workers::list`
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -665,6 +678,7 @@ struct IIIInner {
     connection_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     headers: Mutex<Option<HashMap<String, String>>>,
     otel_config: Mutex<Option<OtelConfig>>,
+    max_message_size: AtomicUsize,
 }
 
 /// WebSocket client for communication with the III Engine.
@@ -700,6 +714,7 @@ impl III {
             connection_thread: Mutex::new(None),
             headers: Mutex::new(None),
             otel_config: Mutex::new(None),
+            max_message_size: AtomicUsize::new(crate::DEFAULT_MAX_MESSAGE_SIZE),
         };
         Self {
             inner: Arc::new(inner),
@@ -724,6 +739,21 @@ impl III {
     /// Set OpenTelemetry configuration (call before connect)
     pub fn set_otel_config(&self, config: OtelConfig) {
         *self.inner.otel_config.lock_or_recover() = Some(config);
+    }
+
+    /// Configure the maximum size in bytes of a single WebSocket invocation
+    /// message. Producer-side `trigger()` calls raise
+    /// [`IIIError::PayloadTooLarge`] when an encoded envelope exceeds this
+    /// value, and the underlying tungstenite connection is built with the
+    /// same ceiling so oversize *incoming* messages also fail loudly instead
+    /// of tearing the connection.
+    pub fn set_max_message_size(&self, size: usize) {
+        self.inner.max_message_size.store(size, Ordering::SeqCst);
+    }
+
+    /// Current invocation-message ceiling (bytes).
+    pub fn max_message_size(&self) -> usize {
+        self.inner.max_message_size.load(Ordering::SeqCst)
     }
 
     pub(crate) fn connect(&self) {
@@ -1082,14 +1112,16 @@ impl III {
 
         // Void is fire-and-forget — no invocation_id, no response
         if matches!(req.action, Some(TriggerAction::Void)) {
-            self.send_message(Message::InvokeFunction {
+            let message = Message::InvokeFunction {
                 invocation_id: None,
                 function_id: req.function_id,
                 data: req.payload,
                 traceparent: tp,
                 baggage: bg,
                 action: req.action,
-            })?;
+            };
+            self.assert_within_limit(&message)?;
+            self.send_message(message)?;
             return Ok(Value::Null);
         }
 
@@ -1098,19 +1130,22 @@ impl III {
         let invocation_id = Uuid::new_v4();
         let (tx, rx) = oneshot::channel();
 
-        self.inner
-            .pending
-            .lock_or_recover()
-            .insert(invocation_id, tx);
-
-        self.send_message(Message::InvokeFunction {
+        let message = Message::InvokeFunction {
             invocation_id: Some(invocation_id),
             function_id: req.function_id,
             data: req.payload,
             traceparent: tp,
             baggage: bg,
             action: req.action,
-        })?;
+        };
+        self.assert_within_limit(&message)?;
+
+        self.inner
+            .pending
+            .lock_or_recover()
+            .insert(invocation_id, tx);
+
+        self.send_message(message)?;
 
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(result)) => result,
@@ -1222,6 +1257,7 @@ impl III {
 
             let custom_headers = self.inner.headers.lock_or_recover().clone();
 
+            let ws_config = Some(build_ws_config(self.max_message_size()));
             let connect_result = if let Some(ref h) = custom_headers {
                 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
                 use tokio_tungstenite::tungstenite::http;
@@ -1239,9 +1275,9 @@ impl III {
                         request.headers_mut().insert(name, val);
                     }
                 }
-                connect_async(request).await
+                connect_async_with_config(request, ws_config, false).await
             } else {
-                connect_async(&self.inner.address).await
+                connect_async_with_config(self.inner.address.as_str(), ws_config, false).await
             };
 
             match connect_result {
@@ -1381,6 +1417,21 @@ impl III {
             }
         }
 
+        Ok(())
+    }
+
+    /// Producer-side guard: refuse to send an invocation message whose
+    /// JSON-encoded form exceeds [`Self::max_message_size`]. Mirrors the
+    /// Python and Node SDK guards so a payload that would tear the WS
+    /// connection or trip the engine's `invocation_failed_payload_too_large`
+    /// gets a fast, deterministic error before the round-trip.
+    fn assert_within_limit(&self, message: &Message) -> Result<(), IIIError> {
+        let limit = self.max_message_size();
+        let encoded = serde_json::to_vec(message)?;
+        let actual = encoded.len();
+        if actual > limit {
+            return Err(IIIError::PayloadTooLarge { actual, limit });
+        }
         Ok(())
     }
 

@@ -30,7 +30,9 @@ use crate::{
         inject_baggage_from_context, inject_traceparent_from_context,
     },
     trigger::{Trigger, TriggerRegistry, TriggerType},
-    worker_connections::{RuntimeWorkerInfo, WorkerConnection, WorkerConnectionRegistry},
+    worker_connections::{
+        DisconnectReason, RuntimeWorkerInfo, WorkerConnection, WorkerConnectionRegistry,
+    },
     workers::worker::rbac_session::Session,
     workers::{
         engine_fn::TRIGGER_WORKERS_AVAILABLE,
@@ -38,6 +40,26 @@ use crate::{
         worker::{WorkerManagerConfig, channels::ChannelManager, rbac_session},
     },
 };
+
+/// Classifies a `axum::Error` raised by the WS recv stream so cleanup
+/// can pick the right error code for in-flight invocations. axum wraps
+/// `tungstenite::Error` opaquely; we match on its formatted Display
+/// because `axum::Error::into_inner` yields a `Box<dyn Error>` that
+/// requires a downcast against tungstenite's exact version, which would
+/// couple the engine to axum's transitive dep.
+///
+/// `tungstenite::Error::Capacity` renders as `"Space limit exceeded: ..."`
+/// (see tungstenite 0.29 `error.rs`). That is the only variant that
+/// fires when our configured `max_message_size` is exceeded by an
+/// inbound frame.
+fn classify_recv_error(err: &axum::Error) -> DisconnectReason {
+    let text = err.to_string();
+    if text.contains("Space limit exceeded") || text.contains("Message too long") {
+        DisconnectReason::PayloadTooLarge
+    } else {
+        DisconnectReason::Other
+    }
+}
 
 /// Abstraction for enqueuing messages to named queues.
 ///
@@ -1419,7 +1441,19 @@ impl Engine {
                             let _ = tx.send(Outbound::Raw(WsMessage::Pong(payload))).await;
                         }
                         Some(Ok(WsMessage::Pong(_))) => {}
-                        Some(Err(_)) | None => {
+                        Some(Err(err)) => {
+                            let reason = classify_recv_error(&err);
+                            tracing::warn!(
+                                peer = %peer,
+                                worker_id = %worker.id,
+                                error = %err,
+                                reason = ?reason,
+                                "Worker WS recv error"
+                            );
+                            worker.set_disconnect_reason(reason).await;
+                            break;
+                        }
+                        None => {
                             break;
                         }
                     }
@@ -1587,9 +1621,22 @@ impl Engine {
 
         let worker_invocations = worker.invocations.read().await;
         tracing::debug!(worker_id = %worker.id, invocations = ?worker_invocations, "Worker invocations");
+        let (halt_code, halt_message) = match worker.disconnect_reason().await {
+            Some(DisconnectReason::PayloadTooLarge) => (
+                "invocation_failed_payload_too_large",
+                "Worker disconnected: WS message exceeded the configured size limit. \
+                 For larger or streamable payloads, use channels.",
+            ),
+            Some(DisconnectReason::Other) | None => ("invocation_stopped", "Invocation stopped"),
+        };
         for invocation_id in worker_invocations.iter() {
-            tracing::debug!(invocation_id = %invocation_id, "Halting invocation");
-            self.invocations.halt_invocation(invocation_id);
+            tracing::debug!(
+                invocation_id = %invocation_id,
+                error_code = halt_code,
+                "Halting invocation"
+            );
+            self.invocations
+                .halt_invocation_with_reason(invocation_id, halt_code, halt_message);
         }
 
         self.trigger_registry.unregister_worker(&worker.id).await;

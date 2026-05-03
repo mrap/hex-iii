@@ -54,6 +54,11 @@ pub use serde_json::Value;
 ///
 /// let iii = register_worker("ws://localhost:49134", InitOptions::default());
 /// ```
+/// Default invocation message ceiling — 16 MiB. Matches the engine and the
+/// other SDKs (Python, Node) so a payload that succeeds in one language
+/// succeeds in all of them.
+pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone, Default)]
 pub struct InitOptions {
     /// Custom worker metadata. Auto-detected if `None`.
@@ -62,6 +67,19 @@ pub struct InitOptions {
     pub headers: Option<std::collections::HashMap<String, String>>,
     /// OpenTelemetry configuration.
     pub otel: Option<crate::telemetry::types::OtelConfig>,
+    /// Maximum size in bytes of a single WebSocket invocation message.
+    /// `None` resolves to [`DEFAULT_MAX_MESSAGE_SIZE`] (16 MiB).
+    /// Producer-side `trigger()` calls raise [`IIIError::PayloadTooLarge`]
+    /// before sending if the encoded envelope exceeds this value.
+    pub max_message_size: Option<usize>,
+}
+
+impl InitOptions {
+    /// Resolve [`Self::max_message_size`] to a concrete byte count, falling
+    /// back to [`DEFAULT_MAX_MESSAGE_SIZE`] when unset.
+    pub fn resolved_max_message_size(&self) -> usize {
+        self.max_message_size.unwrap_or(DEFAULT_MAX_MESSAGE_SIZE)
+    }
 }
 
 /// Create and return a connected SDK instance. The WebSocket connection is
@@ -86,10 +104,12 @@ pub struct InitOptions {
 /// iii.shutdown(); // cleanly stops the connection thread
 /// ```
 pub fn register_worker(address: &str, options: InitOptions) -> III {
+    let max_message_size = options.resolved_max_message_size();
     let InitOptions {
         metadata,
         headers,
         otel,
+        max_message_size: _,
     } = options;
 
     let iii = if let Some(metadata) = metadata {
@@ -97,6 +117,8 @@ pub fn register_worker(address: &str, options: InitOptions) -> III {
     } else {
         III::new(address)
     };
+
+    iii.set_max_message_size(max_message_size);
 
     if let Some(h) = headers {
         iii.set_headers(h);

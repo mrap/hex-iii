@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import * as os from 'node:os'
 import { type Data, WebSocket } from 'ws'
 import { ChannelReader, ChannelWriter } from './channels'
-import { IIIInvocationError, isErrorBody } from './errors'
+import { assertWithinLimit, IIIInvocationError, isErrorBody } from './errors'
 import {
   DEFAULT_BRIDGE_RECONNECTION_CONFIG,
   DEFAULT_INVOCATION_TIMEOUT_MS,
@@ -60,6 +60,13 @@ import { isChannelRef } from './utils'
 const require = createRequire(import.meta.url)
 const { version: SDK_VERSION } = require('../package.json')
 
+/**
+ * Default ceiling for a single WebSocket invocation message. Matches the
+ * engine default and the other SDKs (Python, Rust). Anything larger should
+ * ride a channel — see https://iii.dev/docs/how-to/use-channels.
+ */
+const DEFAULT_MAX_MESSAGE_SIZE = 16 * 1024 * 1024
+
 function getOsInfo(): string {
   return `${os.platform()} ${os.release()} (${os.arch()})`
 }
@@ -109,6 +116,14 @@ export type InitOptions = {
   otel?: Omit<OtelConfig, 'engineWsUrl'>
   /** Custom HTTP headers sent during the WebSocket handshake. */
   headers?: Record<string, string>
+  /**
+   * Maximum size, in bytes, of a single WebSocket message — both the
+   * envelope the SDK sends and what it accepts back. Defaults to 16 MiB,
+   * matching the engine default. The producer-side guard rejects oversize
+   * payloads with {@link IIIPayloadTooLarge} before the WS write so the
+   * caller gets a typed error instead of a generic disconnect.
+   */
+  maxMessageSize?: number
   /** @internal */
   telemetry?: TelemetryOptions
 }
@@ -126,6 +141,7 @@ class Sdk implements ISdk {
   private reconnectTimeout?: NodeJS.Timeout
   private metricsReportingEnabled: boolean
   private invocationTimeoutMs: number
+  private maxMessageSize: number
   private reconnectionConfig: IIIReconnectionConfig
   private reconnectAttempt = 0
   private connectionState: IIIConnectionState = 'disconnected'
@@ -138,6 +154,7 @@ class Sdk implements ISdk {
     this.workerName = options?.workerName ?? getDefaultWorkerName()
     this.metricsReportingEnabled = options?.enableMetricsReporting ?? true
     this.invocationTimeoutMs = options?.invocationTimeoutMs ?? DEFAULT_INVOCATION_TIMEOUT_MS
+    this.maxMessageSize = options?.maxMessageSize ?? DEFAULT_MAX_MESSAGE_SIZE
     this.reconnectionConfig = {
       ...DEFAULT_BRIDGE_RECONNECTION_CONFIG,
       ...options?.reconnectionConfig,
@@ -423,6 +440,12 @@ class Sdk implements ISdk {
     const { function_id, payload, action, timeoutMs } = request
     const effectiveTimeout = timeoutMs ?? this.invocationTimeoutMs
 
+    // Producer-side guard: refuse to put an oversize envelope on the WS.
+    // Without this the engine would just drop the connection (or `ws` would
+    // raise a generic "max payload exceeded"), which is harder to debug than
+    // a typed error pointing at channels.
+    assertWithinLimit(Buffer.byteLength(JSON.stringify(payload ?? null), 'utf8'), this.maxMessageSize)
+
     // Void is fire-and-forget — no invocation_id, no response
     if (action?.type === 'void') {
       const traceparent = injectTraceparent()
@@ -594,7 +617,10 @@ class Sdk implements ISdk {
     }
 
     this.setConnectionState('connecting')
-    this.ws = new WebSocket(this.address, { headers: this.options?.headers })
+    this.ws = new WebSocket(this.address, {
+      headers: this.options?.headers,
+      maxPayload: this.maxMessageSize,
+    })
     this.ws.on('open', this.onSocketOpen.bind(this))
     this.ws.on('close', this.onSocketClose.bind(this))
     this.ws.on('error', this.onSocketError.bind(this))

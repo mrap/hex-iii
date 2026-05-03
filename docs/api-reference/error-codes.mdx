@@ -1,0 +1,141 @@
+---
+title: "Error Codes"
+description: "Stable engine error codes returned in invocation failure bodies. The wire ABI for SDK callers reacting to specific failure modes."
+---
+
+## Error body shape
+
+When a function invocation fails, the engine returns an `ErrorBody` with three fields. The `code` is the stable identifier you should match on; the `message` is human-readable and may evolve.
+
+| Field | Type | Description |
+|---|---|---|
+| `code` | `string` | Stable error code (e.g. `invocation_stopped`, `function_not_found`). The wire ABI — match on this for targeted recovery. |
+| `message` | `string` | Human-readable explanation. Often includes the offending function ID, payload size, or limit value. |
+| `stacktrace` | `string \| null` | Optional worker-side stacktrace, when the failure originated in handler code. |
+
+SDKs surface these as language-native exceptions:
+
+- **Node** — `Error` with the engine `code` / `message` / `stacktrace` propagated through.
+- **Python** — `IIIRemoteError` carrying the `code` and `message`.
+- **Rust** — `IIIError::Remote { code, message, stacktrace }`.
+
+Producer-side guards (e.g. [`IIIPayloadTooLarge`](#producer-side-errors)) raise *before* the WebSocket round-trip and have their own SDK-specific exception types.
+
+## Codes
+
+### Invocation lifecycle
+
+| Code | Emitted when | What to do |
+|---|---|---|
+| <a id="invocation_stopped"></a>`invocation_stopped` | An in-flight invocation was halted by a clean worker disconnect, engine shutdown, or EOF on the WebSocket. The legacy generic stop code. | Usually transient. Retry idempotent calls; if the worker is gone for good, re-route or fail the upstream caller. |
+| <a id="invocation_failed_payload_too_large"></a>`invocation_failed_payload_too_large` | The engine closed the WebSocket because an inbound message from the worker exceeded `iii-worker-manager.max_message_size` (default 16 MiB). Any in-flight invocation on that connection resolves with this code. | Shrink the payload, raise `max_message_size` on both the engine config and the SDK [`InitOptions`](/api-reference/sdk-node#initoptions), or move binary data to [channels](/how-to/use-channels). |
+| `function_not_found` | A `trigger()` referenced a function ID that is not registered with the engine. | Check the function ID for typos; verify the worker that owns it is connected. |
+| `invocation_error` | The engine could not deliver the invocation to the target worker (channel send failed, worker dropped mid-route). | Retry; if persistent, inspect engine logs for the underlying transport error. |
+| `serialization_error` | The engine failed to serialize or deserialize an invocation payload, response, or error envelope. | The payload contains a value that does not round-trip through JSON. Inspect the offending field. |
+| `registration_failed` | A worker's `register_function` / `register_trigger` message was rejected (duplicate ID, malformed format, or invalid trigger config). | Check the registration message against the [SDK reference](/api-reference/sdk-node) and the engine logs for the rejection reason. |
+| `timeout` | The engine's per-invocation deadline expired before the worker returned a result. | Raise `invocation_timeout_ms` on [`InitOptions`](/api-reference/sdk-node#initoptions) or `timeout_ms` on the trigger request, or split the work. |
+
+### Trigger condition evaluation
+
+| Code | Emitted when | What to do |
+|---|---|---|
+| `fail` | A trigger condition explicitly evaluated to fail (`{"fail": "..."}` in a condition expression). | The handler chose to short-circuit. Inspect the condition definition to confirm the intent. |
+
+### Authentication & secrets (`auth`)
+
+| Code | Emitted when | What to do |
+|---|---|---|
+| `missing_env_var` | A function configured with bearer / HMAC / API-key auth references an environment variable that is not set on the engine process. | Set the referenced env var before starting the engine. |
+| `secret_not_found` | Bearer-auth secret env var is not present at invocation time. | Set the env var. |
+| `token_not_found` | HMAC-auth token env var is not present at invocation time. | Set the env var. |
+| `api_key_not_found` | API-key auth env var is not present at invocation time. | Set the env var. |
+
+### HTTP external invocation
+
+These codes are emitted when the engine invokes a function over HTTP (e.g. AWS Lambda, Cloudflare Worker) instead of an SDK-connected worker.
+
+| Code | Emitted when | What to do |
+|---|---|---|
+| `http_error` | The remote endpoint returned a non-2xx status that did not parse as a structured error body. | Check the remote handler logs; verify the URL and auth config. |
+| `http_request_failed` | The HTTP request itself failed (connection refused, DNS error, TLS error). | Confirm reachability from the engine; check the URL. |
+| `http_response_failed` | The connection succeeded but reading the response body failed (truncated, timeout). | Retry; raise the per-invocation timeout if the remote is slow. |
+| `url_validation_failed` | The configured invocation URL is not a valid absolute HTTP(S) URL. | Fix the URL in the function registration. |
+| `serialization_error` | The engine failed to serialize the request body before sending. | Inspect the payload for non-JSON-serializable values. |
+| `timestamp_error` | HMAC auth failed to produce a signing timestamp. | System clock issue on the engine host — confirm time is set. |
+| `invalid_response` | The remote returned a body that did not match the declared response schema. | Align the remote handler's output with the registered `response_format`. |
+
+### Worker connection transport
+
+| Code | Emitted when | What to do |
+|---|---|---|
+| `channel_send_failed` | The engine could not enqueue an outbound message onto a worker's WebSocket send channel (worker dropped or backed-up beyond capacity). | Usually transient; the worker will reconnect. Persistent failures indicate the worker is overloaded. |
+
+### Queue worker (`iii-queue`)
+
+| Code | Emitted when | What to do |
+|---|---|---|
+| `topic_not_set` | A queue trigger or call omitted the required `topic` field. | Provide `topic` in the trigger config or call payload. |
+| `topic_required` | A queue management call (stats, DLQ listing) was made without specifying a topic. | Pass the target topic. |
+| `queue_not_set` | An admin call referenced an unknown queue. | Verify the queue name; create it via the queue config if missing. |
+| `message_id_not_set` | A redrive / discard call did not specify the target `message_id`. | Include the message ID. |
+| `redrive_failed` | The adapter failed to redrive a topic from its DLQ. | Check the adapter logs (Redis, RabbitMQ, builtin). |
+| `redrive_message_failed` | The adapter failed to redrive a single message. | Inspect adapter logs. |
+| `discard_message_failed` | The adapter failed to permanently delete a DLQ message. | Inspect adapter logs. |
+| `list_topics_failed` | The queue adapter failed to enumerate topics. | Adapter / storage backend issue. |
+| `topic_stats_failed` | The queue adapter failed to read topic stats. | Adapter / storage backend issue. |
+| `dlq_topics_failed` | The queue adapter failed to enumerate DLQ topics. | Adapter / storage backend issue. |
+| `dlq_messages_failed` | The queue adapter failed to read DLQ messages for a topic. | Adapter / storage backend issue. |
+
+### Pub/sub worker (`iii-pubsub`)
+
+| Code | Emitted when | What to do |
+|---|---|---|
+| `topic_not_set` | A pub/sub publish or subscribe call omitted the required `topic` field. | Provide `topic` in the call payload. |
+
+### Bridge worker (`iii-bridge`)
+
+| Code | Emitted when | What to do |
+|---|---|---|
+| `bridge_error` | A bridge invocation against a remote engine failed at the transport layer. | Check the remote engine reachability and bridge config. |
+| `deserialization_error` | A bridge response could not be parsed. | Likely a version mismatch between bridged engines; align versions. |
+
+### Observability worker (`iii-observability`)
+
+| Code | Emitted when | What to do |
+|---|---|---|
+| `memory_exporter_not_enabled` | A spans/metrics read call was made but the in-memory exporter was not enabled in the OTel config. | Set `otel.in_memory_exporter: true` in the worker config. |
+
+## Producer-side errors
+
+Some failures never reach the engine. SDKs include a producer-side guard that runs *before* the WebSocket send, so oversized payloads fail fast with a local exception instead of triggering a server-side disconnect:
+
+| SDK | Exception | Trigger |
+|---|---|---|
+| Python | `IIIPayloadTooLarge` (subclass of `ValueError`) carrying `payload_bytes` / `limit_bytes`. | Serialized message would exceed `InitOptions.max_message_size`. |
+| Node | `IIIPayloadTooLarge` carrying `payloadBytes` / `limitBytes`. | Serialized message would exceed `InitOptions.maxMessageSize`. |
+| Rust | [`IIIError::PayloadTooLarge { actual, limit }`](/api-reference/sdk-rust#iiierror). | Serialized message would exceed `InitOptions::resolved_max_message_size()`. |
+
+The message wording is identical across all three SDKs:
+
+```
+Payload {n} bytes exceeds invocation limit {limit} bytes. For binary blobs use channels: https://iii.dev/docs/how-to/use-channels
+```
+
+If you raise the SDK limit above the engine's `max_message_size`, you skip the local guard but then trip [`invocation_failed_payload_too_large`](#invocation_failed_payload_too_large) on the server side. Keep the two values aligned.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Use Channels" href="/how-to/use-channels" icon="signal-stream">
+    Stream binary data instead of cramming it into a single trigger payload
+  </Card>
+  <Card title="Configure the engine" href="/how-to/configure-engine" icon="gear">
+    Tune `iii-worker-manager.max_message_size` and other engine settings
+  </Card>
+  <Card title="Node SDK reference" href="/api-reference/sdk-node#initoptions" icon="js">
+    `maxMessageSize` and other `InitOptions` fields
+  </Card>
+  <Card title="Python SDK reference" href="/api-reference/sdk-python#initoptions" icon="python">
+    `max_message_size` and other `InitOptions` fields
+  </Card>
+</CardGroup>

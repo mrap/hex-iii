@@ -23,6 +23,10 @@ pub enum IIIError {
     Serde(String),
     #[error("websocket error: {0}")]
     WebSocket(String),
+    #[error(
+        "Payload {actual} bytes exceeds invocation limit {limit} bytes. For binary blobs use channels: https://iii.dev/docs/how-to/use-channels"
+    )]
+    PayloadTooLarge { actual: usize, limit: usize },
 }
 
 impl From<serde_json::Error> for IIIError {

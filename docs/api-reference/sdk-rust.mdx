@@ -429,6 +429,7 @@ Configuration options passed to [`register_worker`].
 | --- | --- | --- | --- |
 | `metadata` | Option&lt;[`WorkerMetadata`](#workermetadata)&gt; | No | Custom worker metadata. Auto-detected if `None`. |
 | `headers` | `Option<HashMap<String, String>>` | No | Custom HTTP headers sent during the WebSocket handshake. |
+| `max_message_size` | `Option<usize>` | No | Maximum size in bytes for a single outbound WebSocket message. When `None`, falls back to `DEFAULT_MAX_MESSAGE_SIZE` (16 MiB), matching the engine. Use `InitOptions::resolved_max_message_size()` to read the effective value. The producer-side guard returns `IIIError::PayloadTooLarge { actual, limit }` before sending if a serialized message would exceed this limit; for streamable payloads see [Use Channels](/how-to/use-channels) and the [`invocation_failed_payload_too_large`](/api-reference/error-codes#invocation_failed_payload_too_large) error code. |
 | `otel` | Option&lt;[`OtelConfig`](#otelconfig)&gt; | No | OpenTelemetry configuration. Requires the `otel` feature. |
 
 ### IIIError
@@ -444,6 +445,7 @@ Errors returned by the III SDK.
 | `Handler` | `(String)` | Yes | - |
 | `Serde` | `(String)` | Yes | - |
 | `WebSocket` | `(String)` | Yes | - |
+| `PayloadTooLarge` | `{ actual: usize, limit: usize }` | Yes | Raised by the producer guard before sending when a serialized message would exceed [`InitOptions::max_message_size`](#initoptions). See [`invocation_failed_payload_too_large`](/api-reference/error-codes#invocation_failed_payload_too_large) for the matching engine-side code. |
 
 ### IIIConnectionState
 

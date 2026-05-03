@@ -11,6 +11,7 @@ ConnectionStateCallback = Callable[["IIIConnectionState"], None]
 
 DEFAULT_INVOCATION_TIMEOUT_MS = 30000
 MAX_QUEUE_SIZE = 1000
+DEFAULT_MAX_MESSAGE_SIZE = 16 * 1024 * 1024
 
 
 @dataclass
@@ -72,6 +73,11 @@ class InitOptions:
         otel: OpenTelemetry configuration. Enabled by default.
             Set ``{'enabled': False}`` or env ``OTEL_ENABLED=false`` to disable.
         telemetry: Internal telemetry metadata.
+        max_message_size: Maximum size in bytes of a single WebSocket message
+            sent to or received from the engine. Default ``16 MiB``. Direct
+            ``trigger()`` payloads ride a single message; for larger or
+            streamable payloads use channels. The engine enforces its own
+            ceiling — keep this in sync with the engine config.
     """
 
     worker_name: str | None = None
@@ -81,3 +87,4 @@ class InitOptions:
     otel: OtelConfig | dict[str, Any] | None = None
     headers: dict[str, str] | None = None
     telemetry: TelemetryOptions | None = None
+    max_message_size: int = DEFAULT_MAX_MESSAGE_SIZE

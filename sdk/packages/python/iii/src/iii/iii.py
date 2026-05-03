@@ -17,7 +17,12 @@ import websockets
 from websockets.asyncio.client import ClientConnection
 
 from .channels import ChannelReader, ChannelWriter
-from .errors import IIIInvocationError, IIITimeoutError, _wrap_wire_error
+from .errors import (
+    IIIInvocationError,
+    IIIPayloadTooLarge,
+    IIITimeoutError,
+    _wrap_wire_error,
+)
 from .format_utils import extract_request_format, extract_response_format
 from .iii_constants import (
     DEFAULT_RECONNECTION_CONFIG,
@@ -261,6 +266,7 @@ class III:
             self._ws = await websockets.connect(
                 self._address,
                 additional_headers=self._options.headers,
+                max_size=self._options.max_message_size,
             )
             log.info(f"Connected to {self._address}")
             await self._on_connected()
@@ -350,6 +356,19 @@ class III:
                 data["type"] = data["type"].value
             return data
         return {"data": msg}
+
+    def _assert_within_limit(self, msg: Any) -> None:
+        """Reject oversize invocation envelopes before they reach the WS.
+
+        Raises IIIPayloadTooLarge if the serialized message exceeds
+        ``InitOptions.max_message_size``. Pre-flight rejection prevents one
+        oversize message from tearing the WS connection and halting every
+        in-flight invocation on the worker.
+        """
+        limit = self._options.max_message_size
+        encoded = json.dumps(self._to_dict(msg)).encode("utf-8")
+        if len(encoded) > limit:
+            raise IIIPayloadTooLarge(payload_bytes=len(encoded), limit_bytes=limit)
 
     async def _send(self, msg: Any) -> None:
         data = self._to_dict(msg)
@@ -1042,39 +1061,40 @@ class III:
 
         # Void: fire-and-forget, no response expected
         if isinstance(action, TriggerActionVoid):
-            await self._send(
-                InvokeFunctionMessage(
-                    function_id=function_id,
-                    data=payload,
-                    traceparent=self._inject_traceparent(),
-                    baggage=self._inject_baggage(),
-                    action=action,
-                )
+            msg = InvokeFunctionMessage(
+                function_id=function_id,
+                data=payload,
+                traceparent=self._inject_traceparent(),
+                baggage=self._inject_baggage(),
+                action=action,
             )
+            self._assert_within_limit(msg)
+            await self._send(msg)
             return None
 
         # Enqueue and default: send invocation_id, await response
         invocation_id = str(uuid.uuid4())
         future: asyncio.Future[Any] = self._loop.create_future()
 
-        self._pending[invocation_id] = _PendingInvocation(
-            future=future, function_id=function_id
-        )
-
         enqueue_action: TriggerActionEnqueue | None = (
             action if isinstance(action, TriggerActionEnqueue) else None
         )
 
-        await self._send(
-            InvokeFunctionMessage(
-                function_id=function_id,
-                data=payload,
-                invocation_id=invocation_id,
-                traceparent=self._inject_traceparent(),
-                baggage=self._inject_baggage(),
-                action=enqueue_action,
-            )
+        msg = InvokeFunctionMessage(
+            function_id=function_id,
+            data=payload,
+            invocation_id=invocation_id,
+            traceparent=self._inject_traceparent(),
+            baggage=self._inject_baggage(),
+            action=enqueue_action,
         )
+        self._assert_within_limit(msg)
+
+        self._pending[invocation_id] = _PendingInvocation(
+            future=future, function_id=function_id
+        )
+
+        await self._send(msg)
 
         try:
             return await asyncio.wait_for(future, timeout=timeout_secs)

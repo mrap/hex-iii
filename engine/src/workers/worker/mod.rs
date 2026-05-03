@@ -32,6 +32,16 @@ use crate::{
 
 pub const DEFAULT_PORT: u16 = 49134;
 
+/// Default ceiling for inbound WebSocket messages from workers, in bytes.
+///
+/// 16 MiB is large enough that "small blob" use cases (single images,
+/// JSON-with-embedded-data) ride the direct invocation path without
+/// users needing to switch to channels, but small enough that a runaway
+/// producer can't pin engine memory. Anything larger should use
+/// channels. The engine is the source of truth; SDKs default to the
+/// same value so they don't quietly underflow.
+pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema)]
 pub struct CreateChannelInput {
     #[serde(default)]
@@ -54,6 +64,13 @@ pub struct WorkerManagerConfig {
     #[serde(default)]
     pub middleware_function_id: Option<String>,
     pub rbac: Option<rbac_config::RbacConfig>,
+    /// Maximum size in bytes for a single inbound WebSocket message from
+    /// a worker. Workers exceeding this limit are disconnected and any
+    /// in-flight invocation on that connection resolves with the
+    /// `invocation_failed_payload_too_large` error code. Defaults to 16
+    /// MiB; for larger or streamable payloads, use channels.
+    #[serde(default = "default_max_message_size")]
+    pub max_message_size: usize,
 }
 
 fn default_port() -> u16 {
@@ -64,6 +81,10 @@ fn default_host() -> String {
     "0.0.0.0".to_string()
 }
 
+fn default_max_message_size() -> usize {
+    DEFAULT_MAX_MESSAGE_SIZE
+}
+
 impl Default for WorkerManagerConfig {
     fn default() -> Self {
         Self {
@@ -71,6 +92,7 @@ impl Default for WorkerManagerConfig {
             host: default_host(),
             middleware_function_id: None,
             rbac: None,
+            max_message_size: default_max_message_size(),
         }
     }
 }
@@ -178,6 +200,19 @@ async fn shutdown_signal() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Applies the configured per-message ceiling to a `WebSocketUpgrade`.
+///
+/// Both `ws_handler` and `otel_ws_handler` pass through here so the worker
+/// path and the OTEL path share the same limit and there is one place to
+/// adjust the policy.
+fn apply_message_size_limit(
+    ws: WebSocketUpgrade,
+    config: &WorkerManagerConfig,
+) -> WebSocketUpgrade {
+    ws.max_message_size(config.max_message_size)
+        .max_frame_size(config.max_message_size)
+}
+
 async fn ws_handler(
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
@@ -187,6 +222,7 @@ async fn ws_handler(
 ) -> impl IntoResponse {
     let engine = state.engine.clone();
     let config = state.config.clone();
+    let ws = apply_message_size_limit(ws, &config);
 
     ws.on_upgrade(move |socket| async move {
         if let Err(err) = engine
@@ -211,6 +247,7 @@ async fn otel_ws_handler(
 ) -> impl IntoResponse {
     let engine = state.engine.clone();
     let config = state.config.clone();
+    let ws = apply_message_size_limit(ws, &config);
 
     ws.on_upgrade(move |socket| async move {
         if let Err(err) = engine
@@ -246,5 +283,18 @@ mod tests {
         assert_eq!(config.host, "0.0.0.0");
         assert!(config.middleware_function_id.is_none());
         assert!(config.rbac.is_none());
+    }
+
+    #[test]
+    fn worker_config_default_max_message_size_is_16_mib() {
+        let config: WorkerManagerConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.max_message_size, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn worker_config_max_message_size_override() {
+        let config: WorkerManagerConfig =
+            serde_json::from_str(r#"{"max_message_size": 32}"#).unwrap();
+        assert_eq!(config.max_message_size, 32);
     }
 }

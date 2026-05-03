@@ -44,6 +44,27 @@ class IIITimeoutError(IIIInvocationError):
     """Raised when an invocation exceeds its timeout. ``code == 'TIMEOUT'``."""
 
 
+class IIIPayloadTooLarge(ValueError):
+    """Raised client-side when an invocation payload exceeds the configured limit.
+
+    The SDK rejects oversize payloads before they reach the WebSocket so a
+    single oversize message cannot tear the connection and stop unrelated
+    in-flight invocations on the same worker. Subclasses ``ValueError`` so
+    callers that already guard argument size catch it without changes.
+
+    For binary blobs use channels (see https://iii.dev/docs/how-to/use-channels).
+    """
+
+    def __init__(self, payload_bytes: int, limit_bytes: int) -> None:
+        super().__init__(
+            f"Payload {payload_bytes} bytes exceeds invocation limit "
+            f"{limit_bytes} bytes. For binary blobs use channels: "
+            "https://iii.dev/docs/how-to/use-channels"
+        )
+        self.payload_bytes = payload_bytes
+        self.limit_bytes = limit_bytes
+
+
 def _wrap_wire_error(
     error: Any,
     *,

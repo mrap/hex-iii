@@ -4,9 +4,10 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
-use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
+use tokio_tungstenite::{connect_async_with_config, tungstenite::Message as WsMessage};
 
 use crate::error::IIIError;
+use crate::iii::build_ws_config;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -90,7 +91,12 @@ impl ChannelWriter {
         if guard.is_some() {
             return Ok(());
         }
-        let (stream, _) = connect_async(&self.url).await?;
+        let (stream, _) = connect_async_with_config(
+            &self.url,
+            Some(build_ws_config(crate::DEFAULT_MAX_MESSAGE_SIZE)),
+            false,
+        )
+        .await?;
         let (writer, _reader) = stream.split();
         *guard = Some(writer);
         Ok(())
@@ -159,7 +165,12 @@ impl ChannelReader {
         if guard.is_some() {
             return Ok(());
         }
-        let (stream, _) = connect_async(&self.url).await?;
+        let (stream, _) = connect_async_with_config(
+            &self.url,
+            Some(build_ws_config(crate::DEFAULT_MAX_MESSAGE_SIZE)),
+            false,
+        )
+        .await?;
         let (_writer, reader) = stream.split();
         *guard = Some(reader);
         Ok(())
