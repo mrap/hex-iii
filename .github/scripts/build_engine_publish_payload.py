@@ -8,16 +8,6 @@ import tomllib
 from typing import Any
 
 
-def normalize_dependencies(raw_deps: Any) -> list[dict[str, Any]]:
-    if raw_deps in (None, ""):
-        return []
-    if isinstance(raw_deps, dict):
-        return [{"name": name, "version": version} for name, version in raw_deps.items()]
-    if isinstance(raw_deps, list):
-        return raw_deps
-    raise ValueError(f"`dependencies` must be a map or list, got {type(raw_deps).__name__}")
-
-
 def derive_registry_function_name(function_id: str, metadata: dict[str, Any] | None) -> str:
     metadata = metadata or {}
     for key in ("registry_name", "name"):
@@ -180,6 +170,9 @@ def build_payload(
     readme_path = repo_root / worker_dir / "README.md"
     readme = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
 
+    # The registry's POST /publish schema for `type: engine` only accepts the
+    # base metadata plus `functions` / `triggers`. `dependencies` and `config`
+    # were rejected with HTTP 422 ("Unrecognized key") on iii/v0.11.6-next.2.
     return {
         "worker_name": worker,
         "version": engine_version,
@@ -188,8 +181,6 @@ def build_payload(
         "readme": readme,
         "repo": repo_url,
         "description": meta.get("description", ""),
-        "dependencies": normalize_dependencies(meta.get("dependencies")),
-        "config": meta.get("config") or {},
         "functions": interface.get("functions") or [],
         "triggers": interface.get("triggers") or [],
     }
