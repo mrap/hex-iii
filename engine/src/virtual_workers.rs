@@ -1,0 +1,164 @@
+use std::collections::HashSet;
+
+use dashmap::DashMap;
+use serde_json::Value;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VirtualWorkerInfo {
+    pub name: String,
+    pub owner_worker_id: Uuid,
+    pub function_ids: HashSet<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct VirtualWorkerRegistry {
+    workers: DashMap<String, VirtualWorkerInfo>,
+    function_to_worker: DashMap<String, String>,
+}
+
+impl VirtualWorkerRegistry {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn claim_function(
+        &self,
+        worker_name: impl Into<String>,
+        owner_worker_id: Uuid,
+        function_id: &str,
+    ) {
+        let worker_name = worker_name.into();
+        let function_id = function_id.to_string();
+
+        if let Some((_, previous_worker)) = self
+            .function_to_worker
+            .insert(function_id.clone(), worker_name.clone())
+            .map(|previous| (function_id.clone(), previous))
+            && previous_worker != worker_name
+        {
+            self.remove_from_worker(&previous_worker, &function_id);
+        }
+
+        self.workers
+            .entry(worker_name.clone())
+            .and_modify(|info| {
+                info.owner_worker_id = owner_worker_id;
+                info.function_ids.insert(function_id.clone());
+            })
+            .or_insert_with(|| VirtualWorkerInfo {
+                name: worker_name,
+                owner_worker_id,
+                function_ids: HashSet::from([function_id]),
+            });
+    }
+
+    pub(crate) fn remove_function(&self, function_id: &str) -> Option<String> {
+        let (_, worker_name) = self.function_to_worker.remove(function_id)?;
+        self.remove_from_worker(&worker_name, function_id);
+        Some(worker_name)
+    }
+
+    pub(crate) fn contains_function(&self, function_id: &str) -> bool {
+        self.function_to_worker.contains_key(function_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get(&self, worker_name: &str) -> Option<VirtualWorkerInfo> {
+        self.workers
+            .get(worker_name)
+            .map(|entry| entry.value().clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_worker(&self, worker_name: &str) -> bool {
+        self.workers.contains_key(worker_name)
+    }
+
+    fn remove_from_worker(&self, worker_name: &str, function_id: &str) {
+        let mut should_remove_worker = false;
+        if let Some(mut info) = self.workers.get_mut(worker_name) {
+            info.function_ids.remove(function_id);
+            should_remove_worker = info.function_ids.is_empty();
+        }
+        if should_remove_worker {
+            self.workers.remove(worker_name);
+        }
+    }
+}
+
+pub(crate) fn take_virtual_worker_name(metadata: &mut Option<Value>) -> Option<String> {
+    let value = metadata.as_mut()?;
+    let object = value.as_object_mut()?;
+    let iii = object.get_mut("iii")?;
+    let iii_object = iii.as_object_mut()?;
+    let hint = iii_object.remove("virtualWorker")?;
+    let name = match hint {
+        Value::String(value) => non_empty(value),
+        Value::Object(object) => object
+            .get("name")
+            .and_then(Value::as_str)
+            .and_then(|value| non_empty(value.to_string()))
+            .or_else(|| {
+                object
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .and_then(|value| non_empty(value.to_string()))
+            }),
+        _ => None,
+    };
+
+    if iii_object.is_empty() {
+        object.remove("iii");
+    }
+    if object.is_empty() {
+        *metadata = None;
+    }
+
+    name
+}
+
+fn non_empty(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn take_virtual_worker_name_strips_internal_metadata() {
+        let mut metadata = Some(serde_json::json!({
+            "artifact": { "source": "https://example.com/openapi.json" },
+            "iii": { "virtualWorker": { "name": "hackernews" } }
+        }));
+
+        assert_eq!(
+            take_virtual_worker_name(&mut metadata),
+            Some("hackernews".to_string())
+        );
+        assert_eq!(
+            metadata,
+            Some(serde_json::json!({
+                "artifact": { "source": "https://example.com/openapi.json" }
+            }))
+        );
+    }
+
+    #[test]
+    fn virtual_worker_registry_removes_empty_worker() {
+        let registry = VirtualWorkerRegistry::new();
+        let owner = Uuid::new_v4();
+
+        registry.claim_function("hn", owner, "hn::top_stories");
+        assert!(registry.contains_worker("hn"));
+
+        registry.remove_function("hn::top_stories");
+        assert!(!registry.contains_worker("hn"));
+    }
+}

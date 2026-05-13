@@ -66,6 +66,7 @@ impl HttpFunctionsWorker {
                     timeout_ms: &timeout_ms,
                     headers: &headers,
                     auth: &auth,
+                    trusted_internal: config.trusted_internal,
                 };
 
                 match invoker
@@ -90,15 +91,17 @@ impl HttpFunctionsWorker {
         &self,
         config: HttpFunctionConfig,
     ) -> Result<(), ErrorBody> {
-        self.http_invoker
-            .url_validator()
-            .validate(&config.url)
-            .await
-            .map_err(|e| ErrorBody {
-                code: "url_validation_failed".into(),
-                message: e.to_string(),
-                stacktrace: None,
-            })?;
+        if !config.trusted_internal {
+            self.http_invoker
+                .url_validator()
+                .validate(&config.url)
+                .await
+                .map_err(|e| ErrorBody {
+                    code: "url_validation_failed".into(),
+                    message: e.to_string(),
+                    stacktrace: None,
+                })?;
+        }
 
         let auth = config.auth.as_ref().map(resolve_auth_ref).transpose()?;
 
@@ -174,7 +177,11 @@ impl Worker for HttpFunctionsWorker {
     }
 }
 
-crate::register_worker!("iii-http-functions", HttpFunctionsWorker);
+crate::register_worker!(
+    "iii-http-functions",
+    HttpFunctionsWorker,
+    enabled_by_default = true
+);
 
 #[cfg(test)]
 mod tests {
@@ -321,6 +328,7 @@ mod tests {
             request_format: None,
             response_format: None,
             metadata: None,
+            trusted_internal: false,
             registered_at: None,
             updated_at: None,
         }

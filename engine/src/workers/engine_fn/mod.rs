@@ -266,7 +266,12 @@ impl EngineFunctionsWorker {
                 continue;
             }
 
-            let functions = w.get_function_ids().await;
+            let functions = w
+                .get_function_ids()
+                .await
+                .into_iter()
+                .filter(|function_id| !self.engine.virtual_workers.contains_function(function_id))
+                .collect::<Vec<_>>();
             let function_count = functions.len();
             let active_invocations = w.invocation_count().await;
             // Query latest metrics from OTEL storage

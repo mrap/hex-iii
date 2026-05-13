@@ -34,6 +34,8 @@ pub struct HttpFunctionConfig {
     pub response_format: Option<Value>,
     #[serde(default)]
     pub metadata: Option<Value>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub trusted_internal: bool,
     #[serde(default)]
     pub registered_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -42,6 +44,10 @@ pub struct HttpFunctionConfig {
 
 fn default_method() -> HttpMethod {
     HttpMethod::Post
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[cfg(test)]
