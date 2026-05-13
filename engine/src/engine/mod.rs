@@ -278,6 +278,18 @@ fn is_loopback_http_url(value: &str) -> bool {
     })
 }
 
+fn trusted_virtual_worker_name(
+    worker: &WorkerConnection,
+    metadata: &mut Option<Value>,
+) -> Option<String> {
+    let name = take_virtual_worker_name(metadata)?;
+    worker
+        .session
+        .as_ref()
+        .is_some_and(|session| session.trusted_internal)
+        .then_some(name)
+}
+
 impl Default for Engine {
     fn default() -> Self {
         Self::new()
@@ -1183,7 +1195,8 @@ impl Engine {
                 }
 
                 reg_id = resolve_registration_id(worker, &reg_id);
-                let virtual_worker_name = take_virtual_worker_name(&mut reg_metadata);
+                let virtual_worker_name = trusted_virtual_worker_name(worker, &mut reg_metadata);
+                let trusted_virtual_worker = virtual_worker_name.is_some();
 
                 // Claim ownership BEFORE mutating any engine-global state. An
                 // old worker's `cleanup_worker` running on another task can
@@ -1210,6 +1223,7 @@ impl Engine {
                             function_id = %reg_id,
                             "HTTP functions module not loaded"
                         );
+                        self.service_registry.remove_function_from_services(&reg_id);
                         self.release_external_function_if_owner(&worker.id, &reg_id);
                         return Ok(());
                     };
@@ -1225,9 +1239,8 @@ impl Engine {
                         request_format: req.clone(),
                         response_format: res.clone(),
                         metadata: reg_metadata.clone(),
-                        trusted_internal: virtual_worker_name
-                            .as_ref()
-                            .is_some_and(|_| is_loopback_http_url(&invocation.url)),
+                        trusted_internal: trusted_virtual_worker
+                            && is_loopback_http_url(&invocation.url),
                         registered_at: Some(Utc::now()),
                         updated_at: None,
                     };
@@ -1239,13 +1252,18 @@ impl Engine {
                             error = ?err,
                             "Failed to register HTTP invocation function"
                         );
+                        self.service_registry.remove_function_from_services(&reg_id);
                         self.release_external_function_if_owner(&worker.id, &reg_id);
                         return Ok(());
                     }
 
                     if let Some(worker_name) = virtual_worker_name {
-                        self.virtual_workers
-                            .claim_function(worker_name, worker.id, &reg_id);
+                        self.virtual_workers.claim_function(
+                            worker_name,
+                            worker.id,
+                            trusted_virtual_worker,
+                            &reg_id,
+                        );
                     } else {
                         self.virtual_workers.remove_function(&reg_id);
                     }
@@ -1265,8 +1283,12 @@ impl Engine {
                 );
 
                 if let Some(worker_name) = virtual_worker_name {
-                    self.virtual_workers
-                        .claim_function(worker_name, worker.id, &reg_id);
+                    self.virtual_workers.claim_function(
+                        worker_name,
+                        worker.id,
+                        trusted_virtual_worker,
+                        &reg_id,
+                    );
                 } else {
                     self.virtual_workers.remove_function(&reg_id);
                 }
@@ -2108,6 +2130,7 @@ mod tests {
             allowed_trigger_types: None,
             allow_function_registration: true,
             allow_trigger_type_registration: true,
+            trusted_internal: false,
             context: serde_json::json!({}),
             function_registration_prefix: Some(prefix.to_string()),
         }
@@ -2285,7 +2308,23 @@ mod tests {
             .expect("initialize module");
 
         let (tx, _rx) = mpsc::channel::<Outbound>(8);
-        let worker = WorkerConnection::new(tx);
+        let worker = WorkerConnection::with_session(
+            tx,
+            crate::workers::worker::rbac_session::Session {
+                engine: engine.clone(),
+                config: Arc::new(crate::workers::worker::WorkerManagerConfig::default()),
+                ip_address: "127.0.0.1".to_string(),
+                session_id: uuid::Uuid::new_v4(),
+                allowed_functions: vec![],
+                forbidden_functions: vec![],
+                allowed_trigger_types: None,
+                allow_function_registration: true,
+                allow_trigger_type_registration: true,
+                trusted_internal: true,
+                context: json!({}),
+                function_registration_prefix: None,
+            },
+        );
         let register_msg = Message::RegisterFunction {
             id: "hackernews::top_stories".to_string(),
             description: Some("top stories".to_string()),
@@ -2296,7 +2335,7 @@ mod tests {
                 "iii": { "virtualWorker": { "name": "hackernews" } }
             })),
             invocation: Some(HttpInvocationRef {
-                url: "http://example.com/hackernews/top-stories".to_string(),
+                url: "http://127.0.0.1/hackernews/top-stories".to_string(),
                 method: crate::invocation::method::HttpMethod::Post,
                 timeout_ms: Some(30000),
                 headers: HashMap::new(),
@@ -2314,6 +2353,7 @@ mod tests {
             .get("hackernews")
             .expect("virtual worker should be tracked internally");
         assert_eq!(virtual_worker.name, "hackernews");
+        assert!(virtual_worker.trusted_internal);
         assert!(
             virtual_worker
                 .function_ids
@@ -2341,6 +2381,13 @@ mod tests {
                 .metadata,
             Some(json!({ "artifact": { "source": "https://example.com/openapi.json" } }))
         );
+        assert!(
+            http_module
+                .http_functions()
+                .get("hackernews::top_stories")
+                .expect("http function config should exist")
+                .trusted_internal
+        );
 
         engine
             .router_msg(
@@ -2353,6 +2400,77 @@ mod tests {
             .expect("unregister external function should succeed");
 
         assert!(!engine.virtual_workers.contains_worker("hackernews"));
+    }
+
+    #[tokio::test]
+    async fn test_untrusted_worker_virtual_worker_metadata_is_ignored() {
+        ensure_default_meter();
+        let engine = Arc::new(Engine::new());
+
+        let http_functions_config = HttpFunctionsConfig {
+            security: SecurityConfig {
+                require_https: false,
+                block_private_ips: false,
+                url_allowlist: vec!["*".to_string()],
+            },
+        };
+        let http_functions_module = HttpFunctionsWorker::create(
+            engine.clone(),
+            Some(serde_json::to_value(&http_functions_config).expect("serialize config")),
+        )
+        .await
+        .expect("create module");
+        http_functions_module
+            .initialize()
+            .await
+            .expect("initialize module");
+
+        let (tx, _rx) = mpsc::channel::<Outbound>(8);
+        let worker = WorkerConnection::new(tx);
+        let register_msg = Message::RegisterFunction {
+            id: "hackernews::latest".to_string(),
+            description: Some("latest stories".to_string()),
+            request_format: None,
+            response_format: None,
+            metadata: Some(json!({
+                "artifact": { "source": "https://example.com/openapi.json" },
+                "iii": { "virtualWorker": { "name": "hackernews" } }
+            })),
+            invocation: Some(HttpInvocationRef {
+                url: "http://127.0.0.1/hackernews/latest".to_string(),
+                method: crate::invocation::method::HttpMethod::Post,
+                timeout_ms: Some(30000),
+                headers: HashMap::new(),
+                auth: None,
+            }),
+        };
+
+        engine
+            .router_msg(&worker, &register_msg)
+            .await
+            .expect("register external function should succeed");
+
+        assert!(engine.virtual_workers.get("hackernews").is_none());
+        let function = engine
+            .functions
+            .get("hackernews::latest")
+            .expect("function should still be visible as a normal function");
+        assert_eq!(
+            function.metadata,
+            Some(json!({ "artifact": { "source": "https://example.com/openapi.json" } }))
+        );
+
+        let http_module = engine
+            .service_registry
+            .get_service::<HttpFunctionsWorker>("http_functions")
+            .expect("http_functions service registered");
+        assert!(
+            !http_module
+                .http_functions()
+                .get("hackernews::latest")
+                .expect("http function config should exist")
+                .trusted_internal
+        );
     }
 
     #[tokio::test]
@@ -2951,6 +3069,62 @@ mod tests {
                 .has_external_function_id("external.without_module")
                 .await
         );
+        assert!(!engine.service_registry.services.contains_key("external"));
+    }
+
+    #[tokio::test]
+    async fn test_router_msg_register_http_invocation_failure_rolls_back_service() {
+        ensure_default_meter();
+        let engine = Arc::new(Engine::new());
+        let http_functions_module = HttpFunctionsWorker::create(
+            engine.clone(),
+            Some(serde_json::to_value(HttpFunctionsConfig::default()).expect("serialize config")),
+        )
+        .await
+        .expect("create module");
+        http_functions_module
+            .initialize()
+            .await
+            .expect("initialize module");
+
+        let (tx, _rx) = mpsc::channel::<Outbound>(8);
+        let worker = WorkerConnection::new(tx);
+        let register_message = Message::RegisterFunction {
+            id: "external.invalid_url".to_string(),
+            description: Some("external function".to_string()),
+            request_format: None,
+            response_format: None,
+            metadata: None,
+            invocation: Some(HttpInvocationRef {
+                url: "http://example.com/lambda".to_string(),
+                method: crate::invocation::method::HttpMethod::Post,
+                timeout_ms: Some(30000),
+                headers: HashMap::new(),
+                auth: None,
+            }),
+        };
+
+        engine
+            .router_msg(&worker, &register_message)
+            .await
+            .expect("register message should not fail");
+
+        assert!(engine.functions.get("external.invalid_url").is_none());
+        assert!(
+            !worker
+                .has_external_function_id("external.invalid_url")
+                .await
+        );
+        let http_module = engine
+            .service_registry
+            .get_service::<HttpFunctionsWorker>("http_functions")
+            .expect("http_functions service registered");
+        assert!(
+            !http_module
+                .http_functions()
+                .contains_key("external.invalid_url")
+        );
+        assert!(!engine.service_registry.services.contains_key("external"));
     }
 
     #[tokio::test]

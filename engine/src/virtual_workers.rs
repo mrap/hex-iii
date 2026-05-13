@@ -1,3 +1,9 @@
+// Copyright Motia LLC and/or licensed to Motia LLC under one or more
+// contributor license agreements. Licensed under the Elastic License 2.0;
+// you may not use this file except in compliance with the Elastic License 2.0.
+// This software is patent protected. We welcome discussions - reach out at team@iii.dev
+// See LICENSE and PATENTS files for details.
+
 use std::collections::HashSet;
 
 use dashmap::DashMap;
@@ -8,6 +14,7 @@ use uuid::Uuid;
 pub(crate) struct VirtualWorkerInfo {
     pub name: String,
     pub owner_worker_id: Uuid,
+    pub trusted_internal: bool,
     pub function_ids: HashSet<String>,
 }
 
@@ -26,6 +33,7 @@ impl VirtualWorkerRegistry {
         &self,
         worker_name: impl Into<String>,
         owner_worker_id: Uuid,
+        trusted_internal: bool,
         function_id: &str,
     ) {
         let worker_name = worker_name.into();
@@ -44,11 +52,13 @@ impl VirtualWorkerRegistry {
             .entry(worker_name.clone())
             .and_modify(|info| {
                 info.owner_worker_id = owner_worker_id;
+                info.trusted_internal = trusted_internal;
                 info.function_ids.insert(function_id.clone());
             })
             .or_insert_with(|| VirtualWorkerInfo {
                 name: worker_name,
                 owner_worker_id,
+                trusted_internal,
                 function_ids: HashSet::from([function_id]),
             });
     }
@@ -155,7 +165,7 @@ mod tests {
         let registry = VirtualWorkerRegistry::new();
         let owner = Uuid::new_v4();
 
-        registry.claim_function("hn", owner, "hn::top_stories");
+        registry.claim_function("hn", owner, true, "hn::top_stories");
         assert!(registry.contains_worker("hn"));
 
         registry.remove_function("hn::top_stories");
