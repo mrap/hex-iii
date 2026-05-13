@@ -18,7 +18,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot::error::RecvError};
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use url::Url;
+use url::{Host, Url};
 use uuid::Uuid;
 
 use crate::{
@@ -272,8 +272,10 @@ fn resolve_registration_id(worker: &WorkerConnection, id: &str) -> String {
 fn is_loopback_http_url(value: &str) -> bool {
     Url::parse(value).ok().is_some_and(|url| {
         url.scheme() == "http"
-            && url.host_str().is_some_and(|host| {
-                host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+            && url.host().is_some_and(|host| match host {
+                Host::Domain(host) => host.eq_ignore_ascii_case("localhost"),
+                Host::Ipv4(addr) => addr.is_loopback(),
+                Host::Ipv6(addr) => addr.is_loopback(),
             })
     })
 }
@@ -1937,6 +1939,16 @@ mod tests {
         {
             Err(serde::ser::Error::custom("serialization exploded"))
         }
+    }
+
+    #[test]
+    fn loopback_http_url_matches_ipv4_ipv6_and_localhost() {
+        assert!(super::is_loopback_http_url("http://localhost/worker"));
+        assert!(super::is_loopback_http_url("http://127.0.0.1/worker"));
+        assert!(super::is_loopback_http_url("http://127.0.0.2/worker"));
+        assert!(super::is_loopback_http_url("http://[::1]/worker"));
+        assert!(!super::is_loopback_http_url("https://localhost/worker"));
+        assert!(!super::is_loopback_http_url("http://example.com/worker"));
     }
 
     #[test]

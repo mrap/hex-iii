@@ -4,7 +4,10 @@
 // This software is patent protected. We welcome discussions - reach out at team@iii.dev
 // See LICENSE and PATENTS files for details.
 
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    sync::{Mutex, MutexGuard},
+};
 
 use dashmap::DashMap;
 use serde_json::Value;
@@ -22,6 +25,7 @@ pub(crate) struct VirtualWorkerInfo {
 pub(crate) struct VirtualWorkerRegistry {
     workers: DashMap<String, VirtualWorkerInfo>,
     function_to_worker: DashMap<String, String>,
+    mutation_lock: Mutex<()>,
 }
 
 impl VirtualWorkerRegistry {
@@ -36,6 +40,7 @@ impl VirtualWorkerRegistry {
         trusted_internal: bool,
         function_id: &str,
     ) {
+        let _guard = self.lock_mutation();
         let worker_name = worker_name.into();
         let function_id = function_id.to_string();
 
@@ -64,6 +69,7 @@ impl VirtualWorkerRegistry {
     }
 
     pub(crate) fn remove_function(&self, function_id: &str) -> Option<String> {
+        let _guard = self.lock_mutation();
         let (_, worker_name) = self.function_to_worker.remove(function_id)?;
         self.remove_from_worker(&worker_name, function_id);
         Some(worker_name)
@@ -94,6 +100,12 @@ impl VirtualWorkerRegistry {
         if should_remove_worker {
             self.workers.remove(worker_name);
         }
+    }
+
+    fn lock_mutation(&self) -> MutexGuard<'_, ()> {
+        self.mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -170,5 +182,27 @@ mod tests {
 
         registry.remove_function("hn::top_stories");
         assert!(!registry.contains_worker("hn"));
+    }
+
+    #[test]
+    fn virtual_worker_registry_reclaim_moves_function_between_workers() {
+        let registry = VirtualWorkerRegistry::new();
+        let first_owner = Uuid::new_v4();
+        let second_owner = Uuid::new_v4();
+
+        registry.claim_function("hn", first_owner, true, "shared::top_stories");
+        registry.claim_function("ph", second_owner, false, "shared::top_stories");
+
+        assert!(!registry.contains_worker("hn"));
+        let worker = registry.get("ph").expect("new worker should own function");
+        assert_eq!(worker.owner_worker_id, second_owner);
+        assert!(!worker.trusted_internal);
+        assert!(worker.function_ids.contains("shared::top_stories"));
+        assert_eq!(
+            registry.remove_function("shared::top_stories"),
+            Some("ph".to_string())
+        );
+        assert!(!registry.contains_function("shared::top_stories"));
+        assert!(!registry.contains_worker("ph"));
     }
 }
