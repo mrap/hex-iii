@@ -306,7 +306,7 @@ async def test_exposes_generated_http_functions_as_normal_engine_worker_group() 
                     "source": "stdio:npx -y some-mcp-server",
                     "workerName": worker_name,
                 },
-                "iii": {"virtualWorker": {"name": worker_name}},
+                "iii": {"generatedWorker": {"name": worker_name}},
             },
         )
         time.sleep(0.5)
@@ -329,6 +329,8 @@ async def test_exposes_generated_http_functions_as_normal_engine_worker_group() 
         assert worker["function_count"] == 1
         assert function_id in worker["functions"]
         assert worker.get("internal") is False
+        assert "generated_worker" not in worker
+        assert "generatedWorker" not in worker
         assert "virtual_worker" not in worker
         assert "virtualWorker" not in worker
         assert "isolation" not in worker

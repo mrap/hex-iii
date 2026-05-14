@@ -155,7 +155,7 @@ async fn exposes_generated_http_functions_as_normal_engine_worker_group() {
             "source": "https://example.test/api",
             "workerName": worker_name
         },
-        "iii": { "virtualWorker": { "name": worker_name } }
+        "iii": { "generatedWorker": { "name": worker_name } }
     }));
 
     let http_fn = iii.register_function((
@@ -218,6 +218,8 @@ async fn exposes_generated_http_functions_as_normal_engine_worker_group() {
             .and_then(Value::as_bool)
             .unwrap_or(true)
     );
+    assert!(worker_value.get("generated_worker").is_none());
+    assert!(worker_value.get("generatedWorker").is_none());
     assert!(worker_value.get("virtual_worker").is_none());
     assert!(worker_value.get("virtualWorker").is_none());
     assert!(worker_value.get("isolation").is_none());

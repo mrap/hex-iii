@@ -114,7 +114,7 @@ fn register_generated_http_function(url: String) -> Message {
                 "workerName": "generated-docs-worker"
             },
             "iii": {
-                "virtualWorker": {
+                "generatedWorker": {
                     "name": "generated-docs-worker"
                 }
             }
@@ -190,7 +190,10 @@ async fn generated_bridge_registers_triggerable_function_and_normal_worker_group
     assert_eq!(generated_worker.get("runtime"), Some(&json!("engine")));
     assert_eq!(generated_worker.get("internal"), Some(&json!(false)));
     assert_eq!(generated_worker.get("function_count"), Some(&json!(1)));
+    assert!(generated_worker.get("generated_worker").is_none());
+    assert!(generated_worker.get("generatedWorker").is_none());
     assert!(generated_worker.get("virtual_worker").is_none());
+    assert!(generated_worker.get("virtualWorker").is_none());
     assert!(generated_worker.get("isolation").is_none());
 
     let function_list = engine

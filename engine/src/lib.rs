@@ -9,6 +9,7 @@ pub mod condition;
 pub mod config;
 pub mod engine;
 pub mod function;
+pub(crate) mod generated_workers;
 pub mod invocation;
 pub mod logging;
 pub mod protocol;
@@ -17,7 +18,6 @@ pub mod telemetry;
 pub mod trigger;
 pub mod trigger_formats;
 pub(crate) mod update_ops;
-pub(crate) mod virtual_workers;
 pub mod worker_connections;
 
 pub mod workers {

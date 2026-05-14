@@ -270,7 +270,7 @@ impl EngineFunctionsWorker {
                 .get_function_ids()
                 .await
                 .into_iter()
-                .filter(|function_id| !self.engine.virtual_workers.contains_function(function_id))
+                .filter(|function_id| !self.engine.generated_workers.contains_function(function_id))
                 .collect::<Vec<_>>();
             let function_count = functions.len();
             let active_invocations = w.invocation_count().await;
@@ -324,15 +324,15 @@ impl EngineFunctionsWorker {
             });
         }
 
-        for virtual_worker in self.engine.virtual_workers.list() {
-            let worker_id = virtual_worker.name.clone();
+        for generated_worker in self.engine.generated_workers.list() {
+            let worker_id = generated_worker.name.clone();
             if let Some(filter_id) = filter_worker_id
                 && filter_id != worker_id
             {
                 continue;
             }
 
-            let mut functions = virtual_worker
+            let mut functions = generated_worker
                 .function_ids
                 .iter()
                 .cloned()
@@ -341,7 +341,7 @@ impl EngineFunctionsWorker {
 
             worker_infos.push(WorkerInfo {
                 id: worker_id,
-                name: Some(virtual_worker.name),
+                name: Some(generated_worker.name),
                 runtime: Some("engine".to_string()),
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),
                 os: None,
@@ -926,17 +926,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_worker_infos_includes_generated_group_without_virtual_public_shape() {
+    async fn test_list_worker_infos_includes_generated_group_without_private_public_shape() {
         let (engine, module) = setup_engine_and_module();
         let owner = uuid::Uuid::new_v4();
 
-        engine.virtual_workers.claim_function(
+        engine.generated_workers.claim_function(
             "converted-api-worker",
             owner,
             true,
             "converted_api::get_user",
         );
-        engine.virtual_workers.claim_function(
+        engine.generated_workers.claim_function(
             "converted-api-worker",
             owner,
             true,

@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 use crate::{
     function::{Function, FunctionHandler, FunctionResult, FunctionsRegistry},
+    generated_workers::{GeneratedWorkerRegistry, take_generated_worker_name},
     invocation::{InvocationHandler, http_function::HttpFunctionConfig},
     protocol::{ErrorBody, Message},
     services::{Service, ServicesRegistry},
@@ -34,7 +35,6 @@ use crate::{
         inject_baggage_from_context, inject_traceparent_from_context,
     },
     trigger::{Trigger, TriggerRegistry, TriggerType},
-    virtual_workers::{VirtualWorkerRegistry, take_virtual_worker_name},
     worker_connections::{RuntimeWorkerInfo, WorkerConnection, WorkerConnectionRegistry},
     workers::worker::rbac_session::Session,
     workers::{
@@ -250,7 +250,7 @@ pub struct Engine {
     /// HTTP-invocation variant of `function_owners`, separate because external
     /// functions live in their own per-worker set on `WorkerConnection`.
     pub(crate) external_function_owners: Arc<DashMap<String, Uuid>>,
-    pub(crate) virtual_workers: Arc<VirtualWorkerRegistry>,
+    pub(crate) generated_workers: Arc<GeneratedWorkerRegistry>,
     pub(crate) active_scope: Arc<std::sync::Mutex<Option<crate::workers::reload::ScopeBuilder>>>,
     /// Effective `iii-worker-manager` port, resolved from config at build
     /// time. Set once by `EngineBuilder::build`; subsequent reads see the
@@ -292,11 +292,11 @@ fn is_trusted_bridge_session(session: &Session) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
-fn trusted_virtual_worker_name(
+fn trusted_generated_worker_name(
     worker: &WorkerConnection,
     metadata: &mut Option<Value>,
 ) -> Option<String> {
-    let name = take_virtual_worker_name(metadata)?;
+    let name = take_generated_worker_name(metadata)?;
     worker
         .session
         .as_ref()
@@ -324,7 +324,7 @@ impl Engine {
             queue_module: Arc::new(tokio::sync::RwLock::new(None)),
             function_owners: Arc::new(DashMap::new()),
             external_function_owners: Arc::new(DashMap::new()),
-            virtual_workers: Arc::new(VirtualWorkerRegistry::new()),
+            generated_workers: Arc::new(GeneratedWorkerRegistry::new()),
             active_scope,
             worker_manager_port: Arc::new(std::sync::OnceLock::new()),
         }
@@ -433,7 +433,7 @@ impl Engine {
 
     fn remove_function(&self, function_id: &str) {
         self.functions.remove(function_id);
-        self.virtual_workers.remove_function(function_id);
+        self.generated_workers.remove_function(function_id);
     }
 
     fn remove_function_from_engine(&self, function_id: &str) {
@@ -1101,7 +1101,7 @@ impl Engine {
                         );
                         return Ok(());
                     }
-                    self.virtual_workers.remove_function(&resolved_id);
+                    self.generated_workers.remove_function(&resolved_id);
                     if let Some(http_module) = self
                         .service_registry
                         .get_service::<HttpFunctionsWorker>("http_functions")
@@ -1209,8 +1209,9 @@ impl Engine {
                 }
 
                 reg_id = resolve_registration_id(worker, &reg_id);
-                let virtual_worker_name = trusted_virtual_worker_name(worker, &mut reg_metadata);
-                let trusted_virtual_worker = virtual_worker_name.is_some();
+                let generated_worker_name =
+                    trusted_generated_worker_name(worker, &mut reg_metadata);
+                let trusted_generated_worker = generated_worker_name.is_some();
 
                 // Claim ownership BEFORE mutating any engine-global state. An
                 // old worker's `cleanup_worker` running on another task can
@@ -1253,7 +1254,7 @@ impl Engine {
                         request_format: req.clone(),
                         response_format: res.clone(),
                         metadata: reg_metadata.clone(),
-                        trusted_internal: trusted_virtual_worker
+                        trusted_internal: trusted_generated_worker
                             && is_loopback_http_url(&invocation.url),
                         registered_at: Some(Utc::now()),
                         updated_at: None,
@@ -1271,15 +1272,15 @@ impl Engine {
                         return Ok(());
                     }
 
-                    if let Some(worker_name) = virtual_worker_name {
-                        self.virtual_workers.claim_function(
+                    if let Some(worker_name) = generated_worker_name {
+                        self.generated_workers.claim_function(
                             worker_name,
                             worker.id,
-                            trusted_virtual_worker,
+                            trusted_generated_worker,
                             &reg_id,
                         );
                     } else {
-                        self.virtual_workers.remove_function(&reg_id);
+                        self.generated_workers.remove_function(&reg_id);
                     }
                     worker.include_external_function_id(&reg_id).await;
                     return Ok(());
@@ -1296,15 +1297,15 @@ impl Engine {
                     Box::new(worker.clone()),
                 );
 
-                if let Some(worker_name) = virtual_worker_name {
-                    self.virtual_workers.claim_function(
+                if let Some(worker_name) = generated_worker_name {
+                    self.generated_workers.claim_function(
                         worker_name,
                         worker.id,
-                        trusted_virtual_worker,
+                        trusted_generated_worker,
                         &reg_id,
                     );
                 } else {
-                    self.virtual_workers.remove_function(&reg_id);
+                    self.generated_workers.remove_function(&reg_id);
                 }
                 worker.include_function_id(&reg_id).await;
                 Ok(())
@@ -1652,7 +1653,7 @@ impl Engine {
                     .remove_if(function_id, |_, owner| *owner == worker.id)
                     .is_some()
                 {
-                    self.virtual_workers.remove_function(function_id);
+                    self.generated_workers.remove_function(function_id);
                 }
             }
         }
@@ -2309,7 +2310,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_external_function_virtual_worker_is_internal() {
+    async fn test_external_function_generated_worker_is_internal() {
         ensure_default_meter();
         let engine = Arc::new(Engine::new());
 
@@ -2356,7 +2357,7 @@ mod tests {
             response_format: None,
             metadata: Some(json!({
                 "spec": { "source": "https://example.com/openapi.json" },
-                "iii": { "virtualWorker": { "name": "hackernews" } }
+                "iii": { "generatedWorker": { "name": "hackernews" } }
             })),
             invocation: Some(HttpInvocationRef {
                 url: "http://127.0.0.1/hackernews/top-stories".to_string(),
@@ -2372,14 +2373,14 @@ mod tests {
             .await
             .expect("register external function should succeed");
 
-        let virtual_worker = engine
-            .virtual_workers
+        let generated_worker = engine
+            .generated_workers
             .get("hackernews")
-            .expect("virtual worker should be tracked internally");
-        assert_eq!(virtual_worker.name, "hackernews");
-        assert!(virtual_worker.trusted_internal);
+            .expect("generated worker should be tracked internally");
+        assert_eq!(generated_worker.name, "hackernews");
+        assert!(generated_worker.trusted_internal);
         assert!(
-            virtual_worker
+            generated_worker
                 .function_ids
                 .contains("hackernews::top_stories")
         );
@@ -2423,11 +2424,11 @@ mod tests {
             .await
             .expect("unregister external function should succeed");
 
-        assert!(!engine.virtual_workers.contains_worker("hackernews"));
+        assert!(!engine.generated_workers.contains_worker("hackernews"));
     }
 
     #[tokio::test]
-    async fn test_local_external_function_virtual_worker_bridge_is_internal() {
+    async fn test_local_external_function_generated_worker_bridge_is_internal() {
         ensure_default_meter();
         let engine = Arc::new(Engine::new());
 
@@ -2474,7 +2475,7 @@ mod tests {
             response_format: None,
             metadata: Some(json!({
                 "spec": { "source": "http://127.0.0.1/openapi.json" },
-                "iii": { "virtualWorker": { "name": "local-api" } }
+                "iii": { "generatedWorker": { "name": "local-api" } }
             })),
             invocation: Some(HttpInvocationRef {
                 url: "http://127.0.0.1/local-api/echo".to_string(),
@@ -2490,13 +2491,13 @@ mod tests {
             .await
             .expect("register external function should succeed");
 
-        let virtual_worker = engine
-            .virtual_workers
+        let generated_worker = engine
+            .generated_workers
             .get("local-api")
-            .expect("virtual worker should be tracked internally");
-        assert_eq!(virtual_worker.name, "local-api");
-        assert!(virtual_worker.trusted_internal);
-        assert!(virtual_worker.function_ids.contains("local_api::echo"));
+            .expect("generated worker should be tracked internally");
+        assert_eq!(generated_worker.name, "local-api");
+        assert!(generated_worker.trusted_internal);
+        assert!(generated_worker.function_ids.contains("local_api::echo"));
 
         let http_module = engine
             .service_registry
@@ -2512,7 +2513,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_untrusted_worker_virtual_worker_metadata_is_ignored() {
+    async fn test_untrusted_worker_generated_worker_metadata_is_ignored() {
         ensure_default_meter();
         let engine = Arc::new(Engine::new());
 
@@ -2543,7 +2544,7 @@ mod tests {
             response_format: None,
             metadata: Some(json!({
                 "spec": { "source": "https://example.com/openapi.json" },
-                "iii": { "virtualWorker": { "name": "hackernews" } }
+                "iii": { "generatedWorker": { "name": "hackernews" } }
             })),
             invocation: Some(HttpInvocationRef {
                 url: "http://127.0.0.1/hackernews/latest".to_string(),
@@ -2559,7 +2560,7 @@ mod tests {
             .await
             .expect("register external function should succeed");
 
-        assert!(engine.virtual_workers.get("hackernews").is_none());
+        assert!(engine.generated_workers.get("hackernews").is_none());
         let function = engine
             .functions
             .get("hackernews::latest")

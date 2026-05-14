@@ -165,7 +165,7 @@ describe('HTTP external functions', () => {
               source: 'https://example.test/openapi.json',
               workerName,
             },
-            iii: { virtualWorker: { name: workerName } },
+            iii: { generatedWorker: { name: workerName } },
           },
         },
       )
@@ -199,6 +199,8 @@ describe('HTTP external functions', () => {
 
       const workerPublicShape = worker as unknown as Record<string, unknown>
       expect(workerPublicShape.internal).toBe(false)
+      expect(workerPublicShape.generated_worker).toBeUndefined()
+      expect(workerPublicShape.generatedWorker).toBeUndefined()
       expect(workerPublicShape.virtual_worker).toBeUndefined()
       expect(workerPublicShape.virtualWorker).toBeUndefined()
       expect(workerPublicShape.isolation).toBeUndefined()

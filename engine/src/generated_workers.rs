@@ -14,7 +14,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct VirtualWorkerInfo {
+pub(crate) struct GeneratedWorkerInfo {
     pub name: String,
     pub owner_worker_id: Uuid,
     pub trusted_internal: bool,
@@ -22,13 +22,13 @@ pub(crate) struct VirtualWorkerInfo {
 }
 
 #[derive(Default)]
-pub(crate) struct VirtualWorkerRegistry {
-    workers: DashMap<String, VirtualWorkerInfo>,
+pub(crate) struct GeneratedWorkerRegistry {
+    workers: DashMap<String, GeneratedWorkerInfo>,
     function_to_worker: DashMap<String, String>,
     mutation_lock: Mutex<()>,
 }
 
-impl VirtualWorkerRegistry {
+impl GeneratedWorkerRegistry {
     pub(crate) fn new() -> Self {
         Self::default()
     }
@@ -60,7 +60,7 @@ impl VirtualWorkerRegistry {
                 info.trusted_internal = trusted_internal;
                 info.function_ids.insert(function_id.clone());
             })
-            .or_insert_with(|| VirtualWorkerInfo {
+            .or_insert_with(|| GeneratedWorkerInfo {
                 name: worker_name,
                 owner_worker_id,
                 trusted_internal,
@@ -79,7 +79,7 @@ impl VirtualWorkerRegistry {
         self.function_to_worker.contains_key(function_id)
     }
 
-    pub(crate) fn list(&self) -> Vec<VirtualWorkerInfo> {
+    pub(crate) fn list(&self) -> Vec<GeneratedWorkerInfo> {
         self.workers
             .iter()
             .map(|entry| entry.value().clone())
@@ -87,7 +87,7 @@ impl VirtualWorkerRegistry {
     }
 
     #[cfg(test)]
-    pub(crate) fn get(&self, worker_name: &str) -> Option<VirtualWorkerInfo> {
+    pub(crate) fn get(&self, worker_name: &str) -> Option<GeneratedWorkerInfo> {
         self.workers
             .get(worker_name)
             .map(|entry| entry.value().clone())
@@ -116,12 +116,14 @@ impl VirtualWorkerRegistry {
     }
 }
 
-pub(crate) fn take_virtual_worker_name(metadata: &mut Option<Value>) -> Option<String> {
+pub(crate) fn take_generated_worker_name(metadata: &mut Option<Value>) -> Option<String> {
     let value = metadata.as_mut()?;
     let object = value.as_object_mut()?;
     let iii = object.get_mut("iii")?;
     let iii_object = iii.as_object_mut()?;
-    let hint = iii_object.remove("virtualWorker")?;
+    let hint = iii_object
+        .remove("generatedWorker")
+        .or_else(|| iii_object.remove("virtualWorker"))?;
     let name = match hint {
         Value::String(value) => non_empty(value),
         Value::Object(object) => object
@@ -161,14 +163,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn take_virtual_worker_name_strips_internal_metadata() {
+    fn take_generated_worker_name_strips_internal_metadata() {
         let mut metadata = Some(serde_json::json!({
             "spec": { "source": "https://example.com/openapi.json" },
-            "iii": { "virtualWorker": { "name": "hackernews" } }
+            "iii": { "generatedWorker": { "name": "hackernews" } }
         }));
 
         assert_eq!(
-            take_virtual_worker_name(&mut metadata),
+            take_generated_worker_name(&mut metadata),
             Some("hackernews".to_string())
         );
         assert_eq!(
@@ -180,8 +182,27 @@ mod tests {
     }
 
     #[test]
-    fn virtual_worker_registry_removes_empty_worker() {
-        let registry = VirtualWorkerRegistry::new();
+    fn take_generated_worker_name_accepts_legacy_private_hint() {
+        let mut metadata = Some(serde_json::json!({
+            "spec": { "source": "https://example.com/openapi.json" },
+            "iii": { "virtualWorker": { "name": "hackernews" } }
+        }));
+
+        assert_eq!(
+            take_generated_worker_name(&mut metadata),
+            Some("hackernews".to_string())
+        );
+        assert_eq!(
+            metadata,
+            Some(serde_json::json!({
+                "spec": { "source": "https://example.com/openapi.json" }
+            }))
+        );
+    }
+
+    #[test]
+    fn generated_worker_registry_removes_empty_worker() {
+        let registry = GeneratedWorkerRegistry::new();
         let owner = Uuid::new_v4();
 
         registry.claim_function("hn", owner, true, "hn::top_stories");
@@ -192,8 +213,8 @@ mod tests {
     }
 
     #[test]
-    fn virtual_worker_registry_reclaim_moves_function_between_workers() {
-        let registry = VirtualWorkerRegistry::new();
+    fn generated_worker_registry_reclaim_moves_function_between_workers() {
+        let registry = GeneratedWorkerRegistry::new();
         let first_owner = Uuid::new_v4();
         let second_owner = Uuid::new_v4();
 
