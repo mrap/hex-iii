@@ -486,6 +486,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_http_function_skips_url_validation_when_trusted_internal() {
+        ensure_default_meter();
+        let engine = Arc::new(crate::engine::Engine::new());
+        let module = build_module(engine);
+
+        let mut config = make_function_config("trusted.bad", "://bad-url".to_string());
+        config.trusted_internal = true;
+
+        module
+            .register_http_function(config)
+            .await
+            .expect("trusted internal function should register");
+        assert!(module.http_functions.contains_key("trusted.bad"));
+    }
+
+    #[tokio::test]
+    async fn unregister_http_function_returns_not_found_for_missing_path() {
+        ensure_default_meter();
+        let engine = Arc::new(crate::engine::Engine::new());
+        let module = build_module(engine);
+
+        let err = module
+            .unregister_http_function("does.not.exist")
+            .await
+            .expect_err("missing function should error");
+        assert_eq!(err.code, "function_not_found");
+    }
+
+    #[tokio::test]
     #[serial]
     async fn register_http_function_resolves_bearer_auth_and_sends_header() {
         ensure_default_meter();
