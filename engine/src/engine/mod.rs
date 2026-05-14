@@ -1211,7 +1211,9 @@ impl Engine {
                 reg_id = resolve_registration_id(worker, &reg_id);
                 let generated_worker_name =
                     trusted_generated_worker_name(worker, &mut reg_metadata);
-                let trusted_generated_worker = generated_worker_name.is_some();
+                let is_external_registration = invocation.is_some();
+                let had_existing_external_function =
+                    is_external_registration && self.functions.get(&reg_id).is_some();
 
                 // Claim ownership BEFORE mutating any engine-global state. An
                 // old worker's `cleanup_worker` running on another task can
@@ -1219,11 +1221,16 @@ impl Engine {
                 // id, and tear down the registration we're about to write.
                 // Claiming first makes the CAS release in cleanup see the new
                 // owner and bail out for every subsequent step.
-                if invocation.is_some() {
-                    self.claim_external_function(worker.id, &reg_id);
+                let previous_external_owner = if is_external_registration {
+                    let previous_owner =
+                        self.claim_external_function_for_registration(worker.id, &reg_id);
+                    had_existing_external_function
+                        .then_some(previous_owner)
+                        .flatten()
                 } else {
                     self.claim_function(worker.id, &reg_id);
-                }
+                    None
+                };
 
                 self.service_registry
                     .register_service_from_function_id(&reg_id);
@@ -1238,10 +1245,18 @@ impl Engine {
                             function_id = %reg_id,
                             "HTTP functions module not loaded"
                         );
-                        self.service_registry.remove_function_from_services(&reg_id);
-                        self.release_external_function_if_owner(&worker.id, &reg_id);
+                        let rolled_back = self.rollback_external_function_claim(
+                            &worker.id,
+                            &reg_id,
+                            previous_external_owner,
+                        );
+                        if rolled_back && !had_existing_external_function {
+                            self.service_registry.remove_function_from_services(&reg_id);
+                        }
                         return Ok(());
                     };
+                    let trusted_internal =
+                        generated_worker_name.is_some() && is_loopback_http_url(&invocation.url);
 
                     let config = HttpFunctionConfig {
                         function_path: reg_id.clone(),
@@ -1254,8 +1269,7 @@ impl Engine {
                         request_format: req.clone(),
                         response_format: res.clone(),
                         metadata: reg_metadata.clone(),
-                        trusted_internal: trusted_generated_worker
-                            && is_loopback_http_url(&invocation.url),
+                        trusted_internal,
                         registered_at: Some(Utc::now()),
                         updated_at: None,
                     };
@@ -1267,8 +1281,14 @@ impl Engine {
                             error = ?err,
                             "Failed to register HTTP invocation function"
                         );
-                        self.service_registry.remove_function_from_services(&reg_id);
-                        self.release_external_function_if_owner(&worker.id, &reg_id);
+                        let rolled_back = self.rollback_external_function_claim(
+                            &worker.id,
+                            &reg_id,
+                            previous_external_owner,
+                        );
+                        if rolled_back && !had_existing_external_function {
+                            self.service_registry.remove_function_from_services(&reg_id);
+                        }
                         return Ok(());
                     }
 
@@ -1276,7 +1296,7 @@ impl Engine {
                         self.generated_workers.claim_function(
                             worker_name,
                             worker.id,
-                            trusted_generated_worker,
+                            trusted_internal,
                             &reg_id,
                         );
                     } else {
@@ -1298,12 +1318,8 @@ impl Engine {
                 );
 
                 if let Some(worker_name) = generated_worker_name {
-                    self.generated_workers.claim_function(
-                        worker_name,
-                        worker.id,
-                        trusted_generated_worker,
-                        &reg_id,
-                    );
+                    self.generated_workers
+                        .claim_function(worker_name, worker.id, true, &reg_id);
                 } else {
                     self.generated_workers.remove_function(&reg_id);
                 }
@@ -1700,11 +1716,15 @@ impl Engine {
         }
     }
 
-    /// HTTP-invocation variant of `claim_function`.
-    fn claim_external_function(&self, worker_id: Uuid, function_id: &str) {
-        if let Some(previous) = self
+    fn claim_external_function_for_registration(
+        &self,
+        worker_id: Uuid,
+        function_id: &str,
+    ) -> Option<Uuid> {
+        let previous = self
             .external_function_owners
-            .insert(function_id.to_string(), worker_id)
+            .insert(function_id.to_string(), worker_id);
+        if let Some(previous) = previous
             && previous != worker_id
             && self.worker_registry.workers.contains_key(&previous)
         {
@@ -1715,6 +1735,26 @@ impl Engine {
                 "External function ownership transferred between two live workers — possible cross-worker overwrite"
             );
         }
+        previous
+    }
+
+    fn rollback_external_function_claim(
+        &self,
+        worker_id: &Uuid,
+        function_id: &str,
+        previous_owner: Option<Uuid>,
+    ) -> bool {
+        if let Some(previous_owner) = previous_owner {
+            if let Some(mut owner) = self.external_function_owners.get_mut(function_id)
+                && *owner == *worker_id
+            {
+                *owner = previous_owner;
+                return true;
+            }
+            return false;
+        }
+
+        self.release_external_function_if_owner(worker_id, function_id)
     }
 
     /// Atomically removes `function_id` from the engine ONLY if `worker_id`
@@ -3257,7 +3297,7 @@ mod tests {
         // Ownership gate on UnregisterFunction requires the worker to be the
         // recorded owner. This test sidesteps `router_msg` to seed state, so
         // populate the owner map directly to match the production invariant.
-        engine.claim_external_function(worker.id, "external.cleanup");
+        let _ = engine.claim_external_function_for_registration(worker.id, "external.cleanup");
 
         engine
             .router_msg(
@@ -3959,6 +3999,93 @@ mod tests {
         );
         assert!(!engine.worker_registry.workers.contains_key(&old_worker.id));
         assert!(engine.worker_registry.workers.contains_key(&new_worker.id));
+    }
+
+    #[tokio::test]
+    async fn test_failed_external_reregister_restores_previous_owner() {
+        ensure_default_meter();
+        let engine = Arc::new(Engine::new());
+
+        let http_functions_config = HttpFunctionsConfig {
+            security: SecurityConfig {
+                require_https: false,
+                block_private_ips: false,
+                url_allowlist: vec!["example.com".to_string()],
+            },
+        };
+        let http_functions_module = HttpFunctionsWorker::create(
+            engine.clone(),
+            Some(serde_json::to_value(&http_functions_config).expect("serialize config")),
+        )
+        .await
+        .expect("create module");
+        http_functions_module
+            .initialize()
+            .await
+            .expect("initialize module");
+
+        let make_msg = |url: &str| Message::RegisterFunction {
+            id: "external::rollback".to_string(),
+            description: Some("rollback external".to_string()),
+            request_format: None,
+            response_format: None,
+            metadata: None,
+            invocation: Some(HttpInvocationRef {
+                url: url.to_string(),
+                method: crate::invocation::method::HttpMethod::Post,
+                timeout_ms: Some(30000),
+                headers: HashMap::new(),
+                auth: None,
+            }),
+        };
+
+        let (tx_old, _rx_old) = mpsc::channel::<Outbound>(8);
+        let old_worker = WorkerConnection::new(tx_old);
+        engine.worker_registry.register_worker(old_worker.clone());
+        engine
+            .router_msg(&old_worker, &make_msg("http://example.com/shared"))
+            .await
+            .expect("old worker register should succeed");
+
+        let http_module = engine
+            .service_registry
+            .get_service::<HttpFunctionsWorker>("http_functions")
+            .expect("http_functions service registered");
+        assert_eq!(
+            *engine
+                .external_function_owners
+                .get("external::rollback")
+                .expect("external owner present"),
+            old_worker.id
+        );
+
+        let (tx_new, _rx_new) = mpsc::channel::<Outbound>(8);
+        let new_worker = WorkerConnection::new(tx_new);
+        engine.worker_registry.register_worker(new_worker.clone());
+        engine
+            .router_msg(&new_worker, &make_msg("http://evil.com/shared"))
+            .await
+            .expect("failed reregister should not surface transport error");
+
+        assert_eq!(
+            *engine
+                .external_function_owners
+                .get("external::rollback")
+                .expect("external owner restored"),
+            old_worker.id
+        );
+        assert!(
+            !new_worker
+                .has_external_function_id("external::rollback")
+                .await
+        );
+        assert!(engine.functions.get("external::rollback").is_some());
+        assert!(engine.service_registry.services.contains_key("external"));
+        let config = http_module
+            .http_functions()
+            .get("external::rollback")
+            .expect("previous http config should survive");
+        assert_eq!(config.url, "http://example.com/shared");
     }
 
     #[tokio::test]

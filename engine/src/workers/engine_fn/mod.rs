@@ -348,7 +348,7 @@ impl EngineFunctionsWorker {
                 ip_address: None,
                 internal: false,
                 status: "available".to_string(),
-                connected_at_ms: chrono::Utc::now().timestamp_millis() as u64,
+                connected_at_ms: generated_worker.registered_at as u64,
                 function_count: functions.len(),
                 functions,
                 active_invocations: 0,
@@ -959,6 +959,11 @@ mod tests {
                 "converted_api::list_users".to_string()
             ]
         );
+
+        let connected_at_ms = workers[0].connected_at_ms;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let workers = module.list_worker_infos(None).await;
+        assert_eq!(workers[0].connected_at_ms, connected_at_ms);
     }
 
     // ---- register_worker_metadata tests ----

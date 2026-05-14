@@ -9,6 +9,7 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
+use chrono::Utc;
 use dashmap::DashMap;
 use serde_json::Value;
 use uuid::Uuid;
@@ -18,6 +19,7 @@ pub(crate) struct GeneratedWorkerInfo {
     pub name: String,
     pub owner_worker_id: Uuid,
     pub trusted_internal: bool,
+    pub registered_at: i64,
     pub function_ids: HashSet<String>,
 }
 
@@ -64,6 +66,7 @@ impl GeneratedWorkerRegistry {
                 name: worker_name,
                 owner_worker_id,
                 trusted_internal,
+                registered_at: Utc::now().timestamp_millis(),
                 function_ids: HashSet::from([function_id]),
             });
     }
@@ -121,9 +124,9 @@ pub(crate) fn take_generated_worker_name(metadata: &mut Option<Value>) -> Option
     let object = value.as_object_mut()?;
     let iii = object.get_mut("iii")?;
     let iii_object = iii.as_object_mut()?;
-    let hint = iii_object
-        .remove("generatedWorker")
-        .or_else(|| iii_object.remove("virtualWorker"))?;
+    let generated_hint = iii_object.remove("generatedWorker");
+    let virtual_hint = iii_object.remove("virtualWorker");
+    let hint = generated_hint.or(virtual_hint)?;
     let name = match hint {
         Value::String(value) => non_empty(value),
         Value::Object(object) => object
@@ -201,6 +204,28 @@ mod tests {
     }
 
     #[test]
+    fn take_generated_worker_name_strips_both_private_hint_aliases() {
+        let mut metadata = Some(serde_json::json!({
+            "spec": { "source": "https://example.com/openapi.json" },
+            "iii": {
+                "generatedWorker": { "name": "hackernews" },
+                "virtualWorker": { "name": "legacy" }
+            }
+        }));
+
+        assert_eq!(
+            take_generated_worker_name(&mut metadata),
+            Some("hackernews".to_string())
+        );
+        assert_eq!(
+            metadata,
+            Some(serde_json::json!({
+                "spec": { "source": "https://example.com/openapi.json" }
+            }))
+        );
+    }
+
+    #[test]
     fn generated_worker_registry_removes_empty_worker() {
         let registry = GeneratedWorkerRegistry::new();
         let owner = Uuid::new_v4();
@@ -225,6 +250,7 @@ mod tests {
         let worker = registry.get("ph").expect("new worker should own function");
         assert_eq!(worker.owner_worker_id, second_owner);
         assert!(!worker.trusted_internal);
+        assert!(worker.registered_at > 0);
         assert!(worker.function_ids.contains("shared::top_stories"));
         assert_eq!(
             registry.remove_function("shared::top_stories"),
