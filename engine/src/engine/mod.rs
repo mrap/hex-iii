@@ -3240,7 +3240,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<Outbound>(8);
         let worker = WorkerConnection::new(tx);
         let register_message = Message::RegisterFunction {
-            id: "external.invalid_url".to_string(),
+            id: "external::invalid_url".to_string(),
             description: Some("external function".to_string()),
             request_format: None,
             response_format: None,
@@ -3259,10 +3259,10 @@ mod tests {
             .await
             .expect("register message should not fail");
 
-        assert!(engine.functions.get("external.invalid_url").is_none());
+        assert!(engine.functions.get("external::invalid_url").is_none());
         assert!(
             !worker
-                .has_external_function_id("external.invalid_url")
+                .has_external_function_id("external::invalid_url")
                 .await
         );
         let http_module = engine
@@ -3272,7 +3272,7 @@ mod tests {
         assert!(
             !http_module
                 .http_functions()
-                .contains_key("external.invalid_url")
+                .contains_key("external::invalid_url")
         );
         assert!(!engine.service_registry.services.contains_key("external"));
     }
@@ -3285,32 +3285,32 @@ mod tests {
         let worker = WorkerConnection::new(tx);
 
         engine.register_function_handler(
-            make_request("external.cleanup"),
+            make_request("external::cleanup"),
             super::Handler::new(|_input| async move { FunctionResult::Success(None) }),
         );
         engine
             .service_registry
-            .register_service_from_function_id("external.cleanup");
+            .register_service_from_function_id("external::cleanup");
         worker
-            .include_external_function_id("external.cleanup")
+            .include_external_function_id("external::cleanup")
             .await;
         // Ownership gate on UnregisterFunction requires the worker to be the
         // recorded owner. This test sidesteps `router_msg` to seed state, so
         // populate the owner map directly to match the production invariant.
-        let _ = engine.claim_external_function_for_registration(worker.id, "external.cleanup");
+        let _ = engine.claim_external_function_for_registration(worker.id, "external::cleanup");
 
         engine
             .router_msg(
                 &worker,
                 &Message::UnregisterFunction {
-                    id: "external.cleanup".to_string(),
+                    id: "external::cleanup".to_string(),
                 },
             )
             .await
             .expect("unregister should succeed");
 
-        assert!(engine.functions.get("external.cleanup").is_none());
-        assert!(!worker.has_external_function_id("external.cleanup").await);
+        assert!(engine.functions.get("external::cleanup").is_none());
+        assert!(!worker.has_external_function_id("external::cleanup").await);
         assert!(!engine.service_registry.services.contains_key("external"));
     }
 
