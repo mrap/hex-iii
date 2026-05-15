@@ -76,7 +76,7 @@ export function WorkflowChain({ data, onSpanClick }: WorkflowChainProps) {
   if (chain.length < 2) return null
 
   return (
-    <div className="px-4 py-3 border-t border-[#1D1D1D]">
+    <div className="px-4 py-3 border-t border-border-subtle">
       <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
         <Zap className="w-3 h-3" />
         Workflow Chain

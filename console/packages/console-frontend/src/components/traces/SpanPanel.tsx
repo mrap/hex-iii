@@ -65,9 +65,9 @@ export function SpanPanel({
   const statusConfig = STATUS_CONFIG[span.status] ?? STATUS_CONFIG.default
 
   return (
-    <div className="h-full bg-[#0A0A0A] overflow-hidden flex flex-col animate-panel-in">
+    <div className="h-full bg-sidebar overflow-hidden flex flex-col animate-panel-in">
       {/* Compact header */}
-      <div className="flex-shrink-0 border-b border-[#1D1D1D]">
+      <div className="flex-shrink-0 border-b border-border-subtle">
         {/* Row 1: service badge + span name + close */}
         <div className="flex items-center gap-2 px-4 pt-3 pb-1.5">
           <div
@@ -81,7 +81,7 @@ export function SpanPanel({
             {service}
           </div>
           <h2
-            className="text-sm font-semibold text-[#F4F4F4] leading-tight truncate flex-1 min-w-0"
+            className="text-sm font-semibold text-foreground leading-tight truncate flex-1 min-w-0"
             title={span.name}
           >
             {span.name}
@@ -89,7 +89,7 @@ export function SpanPanel({
           <button
             type="button"
             onClick={onClose}
-            className="p-1 hover:bg-[#1D1D1D] rounded-md transition-colors group flex-shrink-0"
+            className="p-1 hover:bg-border-subtle rounded-md transition-colors group flex-shrink-0"
             aria-label="Close panel (Esc)"
             title="Close (Esc)"
           >
@@ -106,23 +106,23 @@ export function SpanPanel({
           >
             <span>{span.span_id.slice(0, 12)}</span>
             {copiedField === 'spanId' ? (
-              <span className="text-[#22C55E] text-[9px]">copied</span>
+              <span className="text-success text-[9px]">copied</span>
             ) : (
               <Copy className="w-2.5 h-2.5 opacity-0 group-hover:opacity-100 transition-opacity" />
             )}
           </button>
 
-          <div className="w-px h-3 bg-[#1D1D1D]" />
+          <div className="w-px h-3 bg-border-subtle" />
 
-          <div className="flex items-center gap-1 px-2 py-0.5 bg-[#141414] border border-[#1D1D1D] rounded">
-            <Clock className="w-2.5 h-2.5 text-[#F3F724]" />
-            <span className="text-[11px] font-mono font-semibold text-[#F3F724]">
+          <div className="flex items-center gap-1 px-2 py-0.5 bg-elevated border border-border-subtle rounded">
+            <Clock className="w-2.5 h-2.5 text-accent" />
+            <span className="text-[11px] font-mono font-semibold text-accent">
               {formatDuration(span.duration_ms)}
             </span>
           </div>
 
           {traceContext && traceContext.childSpans.length > 0 && (
-            <div className="flex items-center gap-1 px-2 py-0.5 bg-[#141414] border border-[#1D1D1D] rounded">
+            <div className="flex items-center gap-1 px-2 py-0.5 bg-elevated border border-border-subtle rounded">
               <Zap className="w-2.5 h-2.5 text-gray-400" />
               <span className="text-[10px] font-mono text-gray-400">
                 self {formatDuration(traceContext.selfTime)}
@@ -149,13 +149,13 @@ export function SpanPanel({
             </span>
           </div>
 
-          <div className="flex items-center gap-1 px-2 py-0.5 bg-[#141414] border border-[#1D1D1D] rounded">
+          <div className="flex items-center gap-1 px-2 py-0.5 bg-elevated border border-border-subtle rounded">
             <Layers className="w-2.5 h-2.5 text-gray-400" />
             <span className="text-[10px] font-mono text-gray-400">d:{span.depth}</span>
           </div>
 
           {traceContext && traceContext.childSpans.length > 0 && (
-            <div className="flex items-center gap-1 px-2 py-0.5 bg-[#141414] border border-[#1D1D1D] rounded">
+            <div className="flex items-center gap-1 px-2 py-0.5 bg-elevated border border-border-subtle rounded">
               <span className="text-[10px] font-mono text-gray-400">
                 {traceContext.childSpans.length} child
                 {traceContext.childSpans.length !== 1 ? 'ren' : ''}
@@ -170,11 +170,11 @@ export function SpanPanel({
             <button
               type="button"
               onClick={() => traceContext.parentSpan && onNavigateToSpan(traceContext.parentSpan)}
-              className="flex items-center gap-1.5 w-full px-2.5 py-1.5 bg-[#141414] border border-[#1D1D1D] rounded hover:bg-[#1A1A1A] hover:border-[#252525] transition-colors group text-left"
+              className="flex items-center gap-1.5 w-full px-2.5 py-1.5 bg-elevated border border-border-subtle rounded hover:bg-hover hover:border-border-subtle transition-colors group text-left"
             >
-              <ArrowUp className="w-3 h-3 text-gray-500 group-hover:text-[#F3F724] transition-colors flex-shrink-0" />
+              <ArrowUp className="w-3 h-3 text-gray-500 group-hover:text-accent transition-colors flex-shrink-0" />
               <span className="text-[10px] text-gray-500 flex-shrink-0">parent</span>
-              <span className="text-[10px] text-gray-300 truncate group-hover:text-[#F4F4F4] transition-colors">
+              <span className="text-[10px] text-gray-300 truncate group-hover:text-foreground transition-colors">
                 {traceContext.parentSpan.name}
               </span>
               <span className="text-[9px] font-mono text-gray-600 ml-auto flex-shrink-0">
@@ -195,7 +195,7 @@ export function SpanPanel({
             <TabsTrigger value="tags" className="text-[11px]">
               Attributes
               {attrCount > 0 && (
-                <span className="ml-1 px-1 py-0.5 text-[9px] bg-[#1D1D1D] rounded font-mono">
+                <span className="ml-1 px-1 py-0.5 text-[9px] bg-border-subtle rounded font-mono">
                   {attrCount}
                 </span>
               )}
@@ -203,7 +203,7 @@ export function SpanPanel({
             <TabsTrigger value="logs" className="text-[11px]">
               Events
               {eventCount > 0 && (
-                <span className="ml-1 px-1 py-0.5 text-[9px] bg-[#1D1D1D] rounded font-mono">
+                <span className="ml-1 px-1 py-0.5 text-[9px] bg-border-subtle rounded font-mono">
                   {eventCount}
                 </span>
               )}
@@ -217,7 +217,7 @@ export function SpanPanel({
             <TabsTrigger value="otel-logs" className="text-[11px]">
               Logs
               {logCount > 0 && (
-                <span className="ml-1 px-1 py-0.5 text-[9px] bg-[#1D1D1D] rounded font-mono">
+                <span className="ml-1 px-1 py-0.5 text-[9px] bg-border-subtle rounded font-mono">
                   {logCount}
                 </span>
               )}
@@ -228,7 +228,7 @@ export function SpanPanel({
             {linkCount > 0 && (
               <TabsTrigger value="links" className="text-[11px]">
                 Links
-                <span className="ml-1 px-1 py-0.5 text-[9px] bg-[#1D1D1D] rounded font-mono">
+                <span className="ml-1 px-1 py-0.5 text-[9px] bg-border-subtle rounded font-mono">
                   {linkCount}
                 </span>
               </TabsTrigger>

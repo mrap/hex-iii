@@ -20,10 +20,10 @@ export function SpanInfoTab({ span, traceData }: SpanInfoTabProps) {
         <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2.5">
           Timing
         </div>
-        <div className="bg-[#141414] rounded-lg border border-[#1D1D1D] overflow-hidden">
+        <div className="bg-elevated rounded-lg border border-border-subtle overflow-hidden">
           <div className="px-4 pt-4 pb-3">
             <div className="flex items-baseline justify-between mb-2">
-              <span className="font-mono text-xl font-bold text-[#F3F724]">
+              <span className="font-mono text-xl font-bold text-accent">
                 {formatDuration(span.duration_ms)}
               </span>
               {traceData && (
@@ -32,17 +32,17 @@ export function SpanInfoTab({ span, traceData }: SpanInfoTabProps) {
                 </span>
               )}
             </div>
-            <div className="h-1.5 bg-[#0A0A0A] rounded-full overflow-hidden">
+            <div className="h-1.5 bg-sidebar rounded-full overflow-hidden">
               <div
                 className="h-full rounded-full transition-all duration-300"
                 style={{
                   width: `${Math.min(100, Math.max(2, tracePercent))}%`,
-                  background: 'linear-gradient(90deg, #F3F724, #D4D520)',
+                  background: 'linear-gradient(90deg, var(--accent), var(--accent-hover))',
                 }}
               />
             </div>
           </div>
-          <div className="border-t border-[#1D1D1D] px-4 py-2.5 flex items-center justify-between">
+          <div className="border-t border-border-subtle px-4 py-2.5 flex items-center justify-between">
             <span className="text-[11px] text-gray-500">Position in trace</span>
             <span className="text-[11px] font-mono text-gray-400">
               {span.start_percent.toFixed(1)}% →{' '}
@@ -57,18 +57,18 @@ export function SpanInfoTab({ span, traceData }: SpanInfoTabProps) {
         <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2.5">
           Status
         </div>
-        <div className="bg-[#141414] rounded-lg border border-[#1D1D1D] px-4 py-3">
+        <div className="bg-elevated rounded-lg border border-border-subtle px-4 py-3">
           <div className="flex items-center gap-2.5">
             <div
               className={`w-2.5 h-2.5 rounded-full ${
                 span.status === 'ok'
-                  ? 'bg-[#22C55E]'
+                  ? 'bg-success'
                   : span.status === 'error'
-                    ? 'bg-[#EF4444]'
+                    ? 'bg-error'
                     : 'bg-gray-500'
               }`}
             />
-            <span className="font-mono text-sm font-semibold text-[#F4F4F4]">
+            <span className="font-mono text-sm font-semibold text-foreground">
               {span.status.toUpperCase()}
             </span>
           </div>
@@ -80,21 +80,21 @@ export function SpanInfoTab({ span, traceData }: SpanInfoTabProps) {
         <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2.5">
           Service & Operation
         </div>
-        <div className="bg-[#141414] rounded-lg border border-[#1D1D1D] divide-y divide-[#1D1D1D]">
+        <div className="bg-elevated rounded-lg border border-border-subtle divide-y divide-border-subtle">
           <div className="px-4 py-2.5 flex items-center justify-between">
             <span className="text-[11px] text-gray-500">Service</span>
-            <span className="text-sm text-[#F4F4F4] font-medium">{service}</span>
+            <span className="text-sm text-foreground font-medium">{service}</span>
           </div>
           <div className="px-4 py-2.5 flex items-center justify-between gap-4">
             <span className="text-[11px] text-gray-500 flex-shrink-0">Operation</span>
-            <span className="text-sm text-[#F4F4F4] font-mono truncate" title={span.name}>
+            <span className="text-sm text-foreground font-mono truncate" title={span.name}>
               {span.name}
             </span>
           </div>
           {span.depth === 0 && (
             <div className="px-4 py-2.5 flex items-center justify-between">
               <span className="text-[11px] text-gray-500">Type</span>
-              <span className="text-[11px] px-2 py-0.5 bg-[#F3F724]/10 text-[#F3F724] rounded font-medium">
+              <span className="text-[11px] px-2 py-0.5 bg-accent/10 text-accent rounded font-medium">
                 ROOT SPAN
               </span>
             </div>
@@ -107,7 +107,7 @@ export function SpanInfoTab({ span, traceData }: SpanInfoTabProps) {
         <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2.5">
           Identifiers
         </div>
-        <div className="bg-[#141414] rounded-lg border border-[#1D1D1D] divide-y divide-[#1D1D1D]">
+        <div className="bg-elevated rounded-lg border border-border-subtle divide-y divide-border-subtle">
           {[
             { label: 'Trace ID', value: span.trace_id, field: 'traceId' },
             { label: 'Span ID', value: span.span_id, field: 'spanId' },
@@ -119,7 +119,7 @@ export function SpanInfoTab({ span, traceData }: SpanInfoTabProps) {
               key={field}
               type="button"
               onClick={() => copyToClipboard(field, value)}
-              className="w-full px-4 py-2.5 flex items-center justify-between hover:bg-[#1A1A1A] transition-colors group text-left"
+              className="w-full px-4 py-2.5 flex items-center justify-between hover:bg-hover transition-colors group text-left"
             >
               <span className="text-[11px] text-gray-500 flex-shrink-0">{label}</span>
               <div className="flex items-center gap-2 min-w-0 ml-4">
@@ -127,7 +127,7 @@ export function SpanInfoTab({ span, traceData }: SpanInfoTabProps) {
                   {value}
                 </span>
                 {copiedField === field ? (
-                  <span className="text-[10px] text-[#22C55E] flex-shrink-0">copied</span>
+                  <span className="text-[10px] text-success flex-shrink-0">copied</span>
                 ) : (
                   <Copy className="w-3 h-3 text-gray-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
                 )}
@@ -142,10 +142,10 @@ export function SpanInfoTab({ span, traceData }: SpanInfoTabProps) {
         <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2.5">
           Hierarchy
         </div>
-        <div className="bg-[#141414] rounded-lg border border-[#1D1D1D] divide-y divide-[#1D1D1D]">
+        <div className="bg-elevated rounded-lg border border-border-subtle divide-y divide-border-subtle">
           <div className="px-4 py-2.5 flex items-center justify-between">
             <span className="text-[11px] text-gray-500">Depth</span>
-            <span className="text-sm font-mono text-[#F4F4F4]">{span.depth}</span>
+            <span className="text-sm font-mono text-foreground">{span.depth}</span>
           </div>
           {span.flags !== undefined && (
             <div className="px-4 py-2.5 flex items-center justify-between">

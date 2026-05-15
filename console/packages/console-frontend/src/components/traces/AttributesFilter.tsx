@@ -76,7 +76,7 @@ export function AttributesFilter({ value, onChange }: AttributesFilterProps) {
   return (
     <div className="space-y-2">
       {draft.length === 0 ? (
-        <div className="text-xs text-[#5B5B5B] italic font-mono">
+        <div className="text-xs text-muted italic font-mono">
           Filter by span attributes (e.g. http.request.method = POST)
         </div>
       ) : (
@@ -84,7 +84,7 @@ export function AttributesFilter({ value, onChange }: AttributesFilterProps) {
           {draft.map(({ id, key, val }) => (
             <div
               key={id}
-              className="group flex items-center gap-2 bg-[#0A0A0A] border border-[#1D1D1D] rounded-md p-2 hover:border-[#2D2D2D] transition-colors"
+              className="group flex items-center gap-2 bg-sidebar border border-border-subtle rounded-md p-2 hover:border-border transition-colors"
             >
               <input
                 type="text"
@@ -92,21 +92,21 @@ export function AttributesFilter({ value, onChange }: AttributesFilterProps) {
                 value={key}
                 onChange={(e) => handleKeyChange(id, e.target.value)}
                 onKeyDown={handleKeyDown}
-                className="flex-1 bg-transparent border-none text-xs text-[#F4F4F4] placeholder-[#5B5B5B] focus:outline-none font-mono"
+                className="flex-1 bg-transparent border-none text-xs text-foreground placeholder-muted focus:outline-none font-mono"
               />
-              <span className="text-[#5B5B5B] text-xs font-mono">=</span>
+              <span className="text-muted text-xs font-mono">=</span>
               <input
                 type="text"
                 placeholder="value"
                 value={val}
                 onChange={(e) => handleValueChange(id, e.target.value)}
                 onKeyDown={handleKeyDown}
-                className="flex-1 bg-transparent border-none text-xs text-[#F4F4F4] placeholder-[#5B5B5B] focus:outline-none font-mono"
+                className="flex-1 bg-transparent border-none text-xs text-foreground placeholder-muted focus:outline-none font-mono"
               />
               <button
                 type="button"
                 onClick={() => handleRemove(id)}
-                className="p-1 text-[#5B5B5B] hover:text-red-400 hover:bg-[#141414] rounded transition-all opacity-0 group-hover:opacity-100"
+                className="p-1 text-muted hover:text-red-400 hover:bg-elevated rounded transition-all opacity-0 group-hover:opacity-100"
                 title="Remove"
               >
                 <X className="w-3 h-3" />
@@ -121,7 +121,7 @@ export function AttributesFilter({ value, onChange }: AttributesFilterProps) {
           <button
             type="button"
             onClick={handleAdd}
-            className="flex items-center gap-1 px-2 py-1 text-xs font-mono text-[#F3F724] hover:bg-[#141414] rounded transition-colors"
+            className="flex items-center gap-1 px-2 py-1 text-xs font-mono text-accent hover:bg-elevated rounded transition-colors"
           >
             <Plus className="w-3 h-3" />
             Add
@@ -146,7 +146,7 @@ export function AttributesFilter({ value, onChange }: AttributesFilterProps) {
                 key={attr}
                 type="button"
                 onClick={() => handleSuggestionClick(attr)}
-                className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono text-[#9CA3AF] bg-[#0A0A0A] border border-[#1D1D1D] rounded hover:border-[#F3F724] hover:text-[#F3F724] transition-colors"
+                className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono text-secondary bg-sidebar border border-border-subtle rounded hover:border-accent hover:text-accent transition-colors"
                 title={`Add ${attr}`}
               >
                 <Tag className="w-2.5 h-2.5" />

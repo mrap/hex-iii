@@ -102,7 +102,7 @@ export function SpanTagsTab({ span }: SpanTagsTabProps) {
   if (entries.length === 0) {
     return (
       <div className="p-8 text-center">
-        <div className="w-10 h-10 mb-3 mx-auto rounded-lg bg-[#141414] border border-[#1D1D1D] flex items-center justify-center">
+        <div className="w-10 h-10 mb-3 mx-auto rounded-lg bg-elevated border border-border-subtle flex items-center justify-center">
           <Search className="w-5 h-5 text-gray-600" />
         </div>
         <p className="text-sm text-gray-400">No attributes found</p>
@@ -122,7 +122,7 @@ export function SpanTagsTab({ span }: SpanTagsTabProps) {
           placeholder="Filter attributes..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-full pl-9 pr-4 py-2 bg-[#141414] border border-[#1D1D1D] rounded-md text-sm text-[#F4F4F4] placeholder-gray-600 focus:outline-none focus:border-[#F3F724]/50 transition-colors"
+          className="w-full pl-9 pr-4 py-2 bg-elevated border border-border-subtle rounded-md text-sm text-foreground placeholder-gray-600 focus:outline-none focus:border-accent/50 transition-colors"
         />
       </div>
 
@@ -133,12 +133,12 @@ export function SpanTagsTab({ span }: SpanTagsTabProps) {
           return (
             <div
               key={group.namespace}
-              className="bg-[#141414] rounded-lg border border-[#1D1D1D] overflow-hidden"
+              className="bg-elevated rounded-lg border border-border-subtle overflow-hidden"
             >
               <button
                 type="button"
                 onClick={() => toggleGroup(group.namespace)}
-                className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-[#1A1A1A] transition-colors text-left"
+                className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-hover transition-colors text-left"
               >
                 <ChevronRight
                   className={`w-3 h-3 text-gray-500 transition-transform ${isCollapsed ? '' : 'rotate-90'}`}
@@ -152,17 +152,17 @@ export function SpanTagsTab({ span }: SpanTagsTabProps) {
               </button>
 
               {!isCollapsed && (
-                <div className="border-t border-[#1D1D1D] divide-y divide-[#1D1D1D]/50">
+                <div className="border-t border-border-subtle divide-y divide-border-subtle/50">
                   {group.entries.map(([key, value]) => (
                     <button
                       key={key}
                       type="button"
                       onClick={() => copyToClipboard(key, value)}
-                      className="w-full px-4 py-2 hover:bg-[#1A1A1A] transition-colors text-left group"
+                      className="w-full px-4 py-2 hover:bg-hover transition-colors text-left group"
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex-1 min-w-0">
-                          <div className="text-[11px] font-mono text-[#F3F724] mb-0.5">{key}</div>
+                          <div className="text-[11px] font-mono text-accent mb-0.5">{key}</div>
                           <div className="text-[12px] text-gray-300 break-all font-mono leading-relaxed">
                             {typeof value === 'object'
                               ? JSON.stringify(value, null, 2)
@@ -170,7 +170,7 @@ export function SpanTagsTab({ span }: SpanTagsTabProps) {
                           </div>
                         </div>
                         {copiedKey === key ? (
-                          <span className="text-[10px] text-[#22C55E] flex-shrink-0 mt-0.5">
+                          <span className="text-[10px] text-success flex-shrink-0 mt-0.5">
                             copied
                           </span>
                         ) : (
@@ -185,23 +185,23 @@ export function SpanTagsTab({ span }: SpanTagsTabProps) {
           )
         })
       ) : (
-        <div className="bg-[#141414] rounded-lg border border-[#1D1D1D] divide-y divide-[#1D1D1D]/50">
+        <div className="bg-elevated rounded-lg border border-border-subtle divide-y divide-border-subtle/50">
           {filteredEntries.map(([key, value]) => (
             <button
               key={key}
               type="button"
               onClick={() => copyToClipboard(key, value)}
-              className="w-full px-4 py-2.5 hover:bg-[#1A1A1A] transition-colors text-left group"
+              className="w-full px-4 py-2.5 hover:bg-hover transition-colors text-left group"
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="flex-1 min-w-0">
-                  <div className="text-[11px] font-mono text-[#F3F724] mb-0.5">{key}</div>
+                  <div className="text-[11px] font-mono text-accent mb-0.5">{key}</div>
                   <div className="text-[12px] text-gray-300 break-all font-mono leading-relaxed">
                     {typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value)}
                   </div>
                 </div>
                 {copiedKey === key ? (
-                  <span className="text-[10px] text-[#22C55E] flex-shrink-0 mt-0.5">copied</span>
+                  <span className="text-[10px] text-success flex-shrink-0 mt-0.5">copied</span>
                 ) : (
                   <Copy className="w-3 h-3 text-gray-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5" />
                 )}

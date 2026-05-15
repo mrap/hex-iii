@@ -28,18 +28,19 @@ const MINIMAP_H = 100
 
 const SPAN_TYPE_STYLES: Record<string, string> = {
   trigger: 'text-green-400 bg-green-500/10',
-  enqueue: 'text-[#F3F724] bg-[#F3F724]/10',
+  enqueue: 'text-accent bg-accent/10',
   function: 'text-cyan-400 bg-cyan-500/10',
 }
 
 function getNodeBorderClass(isSelected: boolean, isError: boolean): string {
   if (isSelected) {
-    return 'border-[#F3F724] shadow-[0_0_12px_rgba(243,247,36,0.2)] ring-1 ring-[#F3F724]/30'
+    // Accent-tinted glow via color-mix so it re-themes under [data-theme="light"].
+    return 'border-accent shadow-[0_0_12px_color-mix(in_srgb,var(--accent)_20%,transparent)] ring-1 ring-accent/30'
   }
   if (isError) {
-    return 'border-[#EF4444]/40 hover:border-[#EF4444]/70'
+    return 'border-error/40 hover:border-error/70'
   }
-  return 'border-[#1D1D1D] hover:border-[#3D3D3D]'
+  return 'border-border-subtle hover:border-border'
 }
 
 function buildTree(spans: VisualizationSpan[]): LayoutNode[] {
@@ -232,7 +233,7 @@ export function FlowView({ data, onSpanClick, selectedSpanId }: FlowViewProps) {
   }, [totalWidth, totalHeight])
 
   return (
-    <div className="relative w-full h-full overflow-hidden bg-[#080808]" ref={containerRef}>
+    <div className="relative w-full h-full overflow-hidden bg-sidebar" ref={containerRef}>
       {/* Header row */}
       <div className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between px-4 py-2.5 pointer-events-none">
         <span className="text-[10px] text-gray-500 uppercase tracking-wider font-medium pointer-events-auto">
@@ -296,7 +297,7 @@ export function FlowView({ data, onSpanClick, selectedSpanId }: FlowViewProps) {
           {layoutNodes.map((node) => {
             const span = node.span
             const svc = getServiceName(span)
-            const color = colorByService.get(svc) ?? '#666666'
+            const color = colorByService.get(svc) ?? 'var(--muted)'
             const type = classifySpanType(span)
             const isSelected = selectedSpanId === span.span_id
             const isError = span.status === 'error'
@@ -309,7 +310,7 @@ export function FlowView({ data, onSpanClick, selectedSpanId }: FlowViewProps) {
                   e.stopPropagation()
                   onSpanClick(span)
                 }}
-                className={`absolute rounded-lg border transition-all duration-150 text-left group cursor-pointer ${getNodeBorderClass(isSelected, isError)} bg-[#0E0E0E] hover:bg-[#141414]`}
+                className={`absolute rounded-lg border transition-all duration-150 text-left group cursor-pointer ${getNodeBorderClass(isSelected, isError)} bg-elevated hover:bg-elevated`}
                 style={{
                   left: node.x,
                   top: node.y,
@@ -359,7 +360,7 @@ export function FlowView({ data, onSpanClick, selectedSpanId }: FlowViewProps) {
 
                 {/* Error indicator */}
                 {isError && (
-                  <div className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-[#EF4444] border border-[#0E0E0E]" />
+                  <div className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-error border border-elevated" />
                 )}
               </button>
             )
@@ -372,21 +373,21 @@ export function FlowView({ data, onSpanClick, selectedSpanId }: FlowViewProps) {
         <button
           type="button"
           onClick={() => setZoom((z) => Math.min(3, z * 1.2))}
-          className="w-7 h-7 flex items-center justify-center rounded bg-[#141414] border border-[#1D1D1D] text-gray-400 hover:text-white hover:border-[#3D3D3D] transition-colors"
+          className="w-7 h-7 flex items-center justify-center rounded bg-elevated border border-border-subtle text-gray-400 hover:text-white hover:border-border transition-colors"
         >
           <Plus className="w-3.5 h-3.5" />
         </button>
         <button
           type="button"
           onClick={() => setZoom((z) => Math.max(0.1, z * 0.8))}
-          className="w-7 h-7 flex items-center justify-center rounded bg-[#141414] border border-[#1D1D1D] text-gray-400 hover:text-white hover:border-[#3D3D3D] transition-colors"
+          className="w-7 h-7 flex items-center justify-center rounded bg-elevated border border-border-subtle text-gray-400 hover:text-white hover:border-border transition-colors"
         >
           <Minus className="w-3.5 h-3.5" />
         </button>
         <button
           type="button"
           onClick={fitView}
-          className="w-7 h-7 flex items-center justify-center rounded bg-[#141414] border border-[#1D1D1D] text-gray-400 hover:text-white hover:border-[#3D3D3D] transition-colors"
+          className="w-7 h-7 flex items-center justify-center rounded bg-elevated border border-border-subtle text-gray-400 hover:text-white hover:border-border transition-colors"
         >
           <Maximize2 className="w-3 h-3" />
         </button>
@@ -394,7 +395,7 @@ export function FlowView({ data, onSpanClick, selectedSpanId }: FlowViewProps) {
 
       {/* Minimap - bottom right */}
       <div
-        className="absolute bottom-10 right-4 z-10 rounded border border-[#1D1D1D] bg-[#0A0A0A]/90 overflow-hidden"
+        className="absolute bottom-10 right-4 z-10 rounded border border-border-subtle bg-sidebar/90 overflow-hidden"
         style={{ width: MINIMAP_W, height: MINIMAP_H }}
       >
         <svg width={MINIMAP_W} height={MINIMAP_H} role="img" aria-label="Flow minimap">
@@ -432,20 +433,20 @@ export function FlowView({ data, onSpanClick, selectedSpanId }: FlowViewProps) {
       </div>
 
       {/* Legend - bottom center */}
-      <div className="absolute bottom-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-4 px-3 py-1.5 rounded bg-[#0A0A0A]/80 border border-[#1D1D1D]">
+      <div className="absolute bottom-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-4 px-3 py-1.5 rounded bg-sidebar/80 border border-border-subtle">
         <span className="text-[9px] text-gray-600 mr-1">Click to select</span>
         <span className="text-[9px] text-gray-600">Scroll to zoom</span>
         <span className="text-[9px] text-gray-600">Drag to pan</span>
-        <div className="w-px h-3 bg-[#1D1D1D]" />
+        <div className="w-px h-3 bg-border-subtle" />
         {services.map(([name, color]) => (
           <div key={name} className="flex items-center gap-1">
             <div className="w-2 h-2 rounded-sm flex-shrink-0" style={{ backgroundColor: color }} />
             <span className="text-[9px] font-mono text-gray-500">{name}</span>
           </div>
         ))}
-        <div className="w-px h-3 bg-[#1D1D1D]" />
+        <div className="w-px h-3 bg-border-subtle" />
         <div className="flex items-center gap-1">
-          <div className="w-2 h-2 rounded-full bg-[#EF4444] flex-shrink-0" />
+          <div className="w-2 h-2 rounded-full bg-error flex-shrink-0" />
           <span className="text-[9px] font-mono text-gray-500">Error</span>
         </div>
       </div>

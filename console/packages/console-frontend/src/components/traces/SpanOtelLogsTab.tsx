@@ -11,13 +11,19 @@ interface SpanOtelLogsTabProps {
   span: VisualizationSpan
 }
 
+// OTel severity palette. `accent` values feed inline `style` props (CSS
+// strings, not Tailwind classes) and re-theme via `var(--token)`. The
+// warn level uses an iii-specific amber (#F59E0B) because the global
+// `--warning` token is yellow (= accent), which collides with brand
+// signal. A future refactor could promote this to a `--severity-warn`
+// design token.
 const SEVERITY_STYLES = {
   error: {
     label: 'ERROR',
-    text: 'text-[#EF4444]',
-    badge: 'bg-[#EF4444]/15 text-[#EF4444] border-[#EF4444]/20',
-    accent: '#EF4444',
-    cardBg: 'bg-[#EF4444]/5',
+    text: 'text-error',
+    badge: 'bg-error/15 text-error border-error/20',
+    accent: 'var(--error)',
+    cardBg: 'bg-error/5',
   },
   warn: {
     label: 'WARN',
@@ -28,17 +34,17 @@ const SEVERITY_STYLES = {
   },
   info: {
     label: 'INFO',
-    text: 'text-[#3B82F6]',
-    badge: 'bg-[#3B82F6]/15 text-[#3B82F6] border-[#3B82F6]/20',
-    accent: '#3B82F6',
-    cardBg: 'bg-[#141414]',
+    text: 'text-info',
+    badge: 'bg-info/15 text-info border-info/20',
+    accent: 'var(--info)',
+    cardBg: 'bg-elevated',
   },
   debug: {
     label: 'DEBUG',
-    text: 'text-gray-400',
-    badge: 'bg-gray-500/10 text-gray-400 border-gray-500/20',
-    accent: '#6B7280',
-    cardBg: 'bg-[#141414]',
+    text: 'text-muted',
+    badge: 'bg-muted/10 text-muted border-muted/20',
+    accent: 'var(--muted)',
+    cardBg: 'bg-elevated',
   },
 } as const
 
@@ -104,7 +110,7 @@ function JsonValue({ value }: { value: unknown }) {
         <span className="font-mono">{expanded ? 'collapse' : `${lineCount} lines`}</span>
       </button>
       {expanded ? (
-        <pre className="mt-1.5 p-2.5 bg-[#0A0A0A] border border-[#1D1D1D] rounded text-[10px] font-mono text-gray-300 overflow-x-auto leading-relaxed whitespace-pre-wrap break-all">
+        <pre className="mt-1.5 p-2.5 bg-sidebar border border-border-subtle rounded text-[10px] font-mono text-gray-300 overflow-x-auto leading-relaxed whitespace-pre-wrap break-all">
           {pretty}
         </pre>
       ) : (
@@ -126,7 +132,7 @@ function CopyableValue({ label, value }: { label: string; value: string }) {
     >
       <span className="truncate">{value}</span>
       {isCopied ? (
-        <span className="text-[#22C55E] text-[9px] flex-shrink-0">copied</span>
+        <span className="text-success text-[9px] flex-shrink-0">copied</span>
       ) : (
         <Copy className="w-2.5 h-2.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
       )}
@@ -155,7 +161,7 @@ function LogCard({ log, index, firstLogMs }: { log: OtelLog; index: number; firs
   }
 
   return (
-    <div className={`rounded-lg border border-[#1D1D1D] overflow-hidden ${severity.cardBg}`}>
+    <div className={`rounded-lg border border-border-subtle overflow-hidden ${severity.cardBg}`}>
       {/* Severity accent + message */}
       <div className="flex">
         <div
@@ -181,7 +187,7 @@ function LogCard({ log, index, firstLogMs }: { log: OtelLog; index: number; firs
             {log.service_name && (
               <>
                 <span className="text-gray-600">&middot;</span>
-                <span className="px-1 py-0.5 bg-[#1D1D1D] rounded text-gray-400">
+                <span className="px-1 py-0.5 bg-border-subtle rounded text-gray-400">
                   {log.service_name}
                 </span>
               </>
@@ -190,7 +196,7 @@ function LogCard({ log, index, firstLogMs }: { log: OtelLog; index: number; firs
 
           {/* Inline meta attributes (short values) */}
           {metaAttrs.length > 0 && (
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2.5 pt-2.5 border-t border-[#1D1D1D]/50">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2.5 pt-2.5 border-t border-border-subtle/50">
               {metaAttrs.map(([key, value]) => (
                 <div key={key} className="flex items-center gap-1.5 text-[10px]">
                   <span className="text-gray-600 font-mono">{key}</span>
@@ -202,7 +208,7 @@ function LogCard({ log, index, firstLogMs }: { log: OtelLog; index: number; firs
 
           {/* Expandable data attributes (JSON / long values) */}
           {dataAttrs.length > 0 && (
-            <div className="mt-2.5 pt-2.5 border-t border-[#1D1D1D]/50 space-y-2">
+            <div className="mt-2.5 pt-2.5 border-t border-border-subtle/50 space-y-2">
               {dataAttrs.map(([key, value]) => (
                 <div key={key}>
                   <span className="text-[10px] text-gray-600 font-mono">{key}</span>
@@ -242,7 +248,7 @@ export function SpanOtelLogsTab({ span }: SpanOtelLogsTabProps) {
   if (isLoading) {
     return (
       <div className="p-8 text-center">
-        <div className="w-5 h-5 mx-auto mb-2 border-2 border-gray-600 border-t-[#F3F724] rounded-full animate-spin" />
+        <div className="w-5 h-5 mx-auto mb-2 border-2 border-gray-600 border-t-accent rounded-full animate-spin" />
         <p className="text-[11px] text-gray-500">Loading logs...</p>
       </div>
     )
@@ -251,7 +257,7 @@ export function SpanOtelLogsTab({ span }: SpanOtelLogsTabProps) {
   if (logs.length === 0) {
     return (
       <div className="p-8 text-center">
-        <div className="w-10 h-10 mb-3 mx-auto rounded-lg bg-[#141414] border border-[#1D1D1D] flex items-center justify-center">
+        <div className="w-10 h-10 mb-3 mx-auto rounded-lg bg-elevated border border-border-subtle flex items-center justify-center">
           <FileText className="w-5 h-5 text-gray-600" />
         </div>
         <p className="text-sm text-gray-400">No logs found</p>
@@ -271,8 +277,8 @@ export function SpanOtelLogsTab({ span }: SpanOtelLogsTabProps) {
         </span>
         <div className="flex items-center gap-2">
           {errorCount > 0 && (
-            <span className="flex items-center gap-1 text-[9px] font-mono text-[#EF4444]">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#EF4444]" />
+            <span className="flex items-center gap-1 text-[9px] font-mono text-error">
+              <span className="w-1.5 h-1.5 rounded-full bg-error" />
               {errorCount} errors
             </span>
           )}

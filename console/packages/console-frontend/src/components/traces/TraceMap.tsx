@@ -1,3 +1,13 @@
+/**
+ * Service-graph view: nodes rendered to a <canvas> for performance.
+ *
+ * THEMING NOTE — same canvas-hex limitation as FlameGraph; see that
+ * file's header for the recommended refactor pattern (read CSS custom
+ * properties via getComputedStyle and pass into draw calls). Until
+ * applied, TraceMap renders in fixed dark-mode colors regardless of
+ * host theme.
+ */
+
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getServiceColor } from '@/lib/traceColors'
 import type { VisualizationSpan, WaterfallData } from '@/lib/traceTransform'
@@ -322,10 +332,10 @@ export function TraceMap({ data, onSpanClick }: TraceMapProps) {
   return (
     <div className="flex flex-col h-full">
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-[#1D1D1D] bg-[#141414]/30 flex-shrink-0">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-border-subtle bg-elevated/30 flex-shrink-0">
         <div className="flex items-center gap-2 text-xs text-gray-400">
           <span>{nodes.length} services</span>
-          <span className="text-[#1D1D1D]">•</span>
+          <span className="text-border-subtle">•</span>
           <span>{edges.length} connections</span>
         </div>
         <div className="text-xs text-gray-400">Click a node to view service details</div>
@@ -344,7 +354,7 @@ export function TraceMap({ data, onSpanClick }: TraceMapProps) {
         {/* Tooltip */}
         {hoveredNode && (
           <div
-            className="fixed z-50 px-3 py-2 bg-[#141414] border border-[#1D1D1D] rounded-lg shadow-xl pointer-events-none"
+            className="fixed z-50 px-3 py-2 bg-elevated border border-border-subtle rounded-lg shadow-xl pointer-events-none"
             style={{
               left: tooltipPos.x + 12,
               top: tooltipPos.y + 12,
@@ -352,19 +362,19 @@ export function TraceMap({ data, onSpanClick }: TraceMapProps) {
           >
             <div className="flex items-center gap-2 mb-2">
               <span className="w-3 h-3 rounded-sm" style={{ backgroundColor: hoveredNode.color }} />
-              <span className="text-sm font-semibold text-[#F4F4F4]">{hoveredNode.name}</span>
+              <span className="text-sm font-semibold text-foreground">{hoveredNode.name}</span>
             </div>
             <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
               <span className="text-gray-400">Spans:</span>
-              <span className="text-[#F4F4F4] font-mono">{hoveredNode.spanCount}</span>
+              <span className="text-foreground font-mono">{hoveredNode.spanCount}</span>
               <span className="text-gray-400">Duration:</span>
-              <span className="text-[#F4F4F4] font-mono">
+              <span className="text-foreground font-mono">
                 {formatDuration(hoveredNode.totalDuration)}
               </span>
               {hoveredNode.errorCount > 0 && (
                 <>
                   <span className="text-gray-400">Errors:</span>
-                  <span className="text-[#EF4444] font-mono">{hoveredNode.errorCount}</span>
+                  <span className="text-error font-mono">{hoveredNode.errorCount}</span>
                 </>
               )}
             </div>
@@ -373,7 +383,7 @@ export function TraceMap({ data, onSpanClick }: TraceMapProps) {
       </div>
 
       {/* Legend */}
-      <div className="px-4 py-2 border-t border-[#1D1D1D] bg-[#141414]/30 flex items-center gap-6 text-xs text-gray-400 flex-shrink-0">
+      <div className="px-4 py-2 border-t border-border-subtle bg-elevated/30 flex items-center gap-6 text-xs text-gray-400 flex-shrink-0">
         <span className="font-medium">Services:</span>
         {nodes.slice(0, 6).map((node) => (
           <span key={node.id} className="flex items-center gap-1.5">

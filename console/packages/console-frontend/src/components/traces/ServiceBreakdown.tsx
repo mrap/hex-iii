@@ -77,12 +77,12 @@ export function ServiceBreakdown({ data }: ServiceBreakdownProps) {
   }, [data])
 
   return (
-    <div className="bg-[#0A0A0A]">
+    <div className="bg-sidebar">
       {/* Collapsible header */}
       <button
         type="button"
         onClick={() => setIsExpanded(!isExpanded)}
-        className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-[#141414] transition-colors text-left"
+        className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-elevated transition-colors text-left"
         aria-label="Toggle services section"
         aria-expanded={isExpanded}
       >
@@ -117,7 +117,7 @@ export function ServiceBreakdown({ data }: ServiceBreakdownProps) {
                   className="w-2 h-2 rounded-sm flex-shrink-0"
                   style={{ backgroundColor: service.color }}
                 />
-                <span className="text-[11px] text-[#F4F4F4] truncate flex-1 font-medium">
+                <span className="text-[11px] text-foreground truncate flex-1 font-medium">
                   {service.name}
                 </span>
                 <span className="text-[10px] font-mono text-gray-500">
@@ -127,13 +127,13 @@ export function ServiceBreakdown({ data }: ServiceBreakdownProps) {
                   {formatDuration(service.totalDuration)}
                 </span>
                 {service.errorCount > 0 && (
-                  <span className="text-[10px] font-mono text-[#EF4444] font-semibold">
+                  <span className="text-[10px] font-mono text-error font-semibold">
                     {service.errorCount} err
                   </span>
                 )}
               </div>
               {/* Proportional bar */}
-              <div className="h-1 rounded-full bg-[#141414] overflow-hidden ml-4">
+              <div className="h-1 rounded-full bg-elevated overflow-hidden ml-4">
                 <div
                   className="h-full rounded-full transition-all duration-300"
                   style={{

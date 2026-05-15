@@ -65,14 +65,14 @@ export function TraceHeader({ data, traceId, onClose, onSpanClick }: TraceHeader
   const rootService = rootSpan ? getServiceName(rootSpan) : 'trace'
 
   return (
-    <div className="bg-[#0A0A0A] border-b border-[#1D1D1D] flex-shrink-0">
+    <div className="bg-sidebar border-b border-border-subtle flex-shrink-0">
       {/* Row 1: service badge + operation name + close */}
       <div className="flex items-center gap-2 px-4 pt-3 pb-1.5">
-        <div className="px-1.5 py-0.5 rounded text-[10px] font-medium tracking-wide flex-shrink-0 bg-[#22C55E]/8 text-[#22C55E] border border-[#22C55E]/15">
+        <div className="px-1.5 py-0.5 rounded text-[10px] font-medium tracking-wide flex-shrink-0 bg-success/10 text-success border border-success/20">
           {rootService}
         </div>
         <h2
-          className="text-sm font-semibold text-[#F4F4F4] leading-tight truncate flex-1 min-w-0"
+          className="text-sm font-semibold text-foreground leading-tight truncate flex-1 min-w-0"
           title={rootSpan?.name || 'Trace Details'}
         >
           {rootSpan?.name || 'Trace Details'}
@@ -80,7 +80,7 @@ export function TraceHeader({ data, traceId, onClose, onSpanClick }: TraceHeader
         <button
           type="button"
           onClick={onClose}
-          className="p-1 hover:bg-[#1D1D1D] rounded-md transition-colors group flex-shrink-0"
+          className="p-1 hover:bg-border-subtle rounded-md transition-colors group flex-shrink-0"
           aria-label="Close trace detail"
           title="Close (Esc)"
         >
@@ -97,34 +97,34 @@ export function TraceHeader({ data, traceId, onClose, onSpanClick }: TraceHeader
         >
           <span>{traceId.substring(0, 12)}</span>
           {copied ? (
-            <span className="text-[#22C55E] text-[9px]">copied</span>
+            <span className="text-success text-[9px]">copied</span>
           ) : (
             <Copy className="w-2.5 h-2.5 opacity-0 group-hover:opacity-100 transition-opacity" />
           )}
         </button>
 
-        <div className="w-px h-3 bg-[#1D1D1D]" />
+        <div className="w-px h-3 bg-border-subtle" />
 
-        <div className="flex items-center gap-1 px-2 py-0.5 bg-[#141414] border border-[#1D1D1D] rounded">
-          <Clock className="w-2.5 h-2.5 text-[#F3F724]" />
-          <span className="text-[11px] font-mono font-semibold text-[#F3F724]">
+        <div className="flex items-center gap-1 px-2 py-0.5 bg-elevated border border-border-subtle rounded">
+          <Clock className="w-2.5 h-2.5 text-accent" />
+          <span className="text-[11px] font-mono font-semibold text-accent">
             {formatDuration(data.total_duration_ms)}
           </span>
         </div>
 
-        <div className="flex items-center gap-1 px-2 py-0.5 bg-[#141414] border border-[#1D1D1D] rounded">
+        <div className="flex items-center gap-1 px-2 py-0.5 bg-elevated border border-border-subtle rounded">
           <Layers className="w-2.5 h-2.5 text-gray-400" />
           <span className="text-[10px] font-mono text-gray-400">{data.span_count} spans</span>
         </div>
 
-        <div className="flex items-center gap-1 px-2 py-0.5 bg-[#141414] border border-[#1D1D1D] rounded">
+        <div className="flex items-center gap-1 px-2 py-0.5 bg-elevated border border-border-subtle rounded">
           <span className="text-[10px] font-mono text-gray-400">{serviceCount} svc</span>
         </div>
 
         {hasErrors && (
-          <div className="flex items-center gap-1 px-2 py-0.5 bg-[#EF4444]/8 border border-[#EF4444]/15 rounded">
-            <AlertCircle className="w-2.5 h-2.5 text-[#EF4444]" />
-            <span className="text-[10px] font-mono font-semibold text-[#EF4444]">
+          <div className="flex items-center gap-1 px-2 py-0.5 bg-error/10 border border-error/20 rounded">
+            <AlertCircle className="w-2.5 h-2.5 text-error" />
+            <span className="text-[10px] font-mono font-semibold text-error">
               {errorCount} err
             </span>
           </div>
@@ -134,7 +134,7 @@ export function TraceHeader({ data, traceId, onClose, onSpanClick }: TraceHeader
       {/* Service distribution bar */}
       {serviceList.length > 1 && (
         <div className="px-4 pb-2.5">
-          <div className="flex h-1.5 rounded-full overflow-hidden bg-[#141414] border border-[#1D1D1D]">
+          <div className="flex h-1.5 rounded-full overflow-hidden bg-elevated border border-border-subtle">
             {serviceList.map((svc) => {
               const svcDuration = serviceDurations.get(svc) || 0
               const pct = (svcDuration / data.total_duration_ms) * 100
@@ -176,7 +176,7 @@ export function TraceHeader({ data, traceId, onClose, onSpanClick }: TraceHeader
               <button
                 type="button"
                 onClick={() => onSpanClick?.(span)}
-                className="text-[10px] font-mono text-gray-400 hover:text-white truncate max-w-[120px] flex-shrink-0 px-1 py-0.5 rounded hover:bg-[#1D1D1D] transition-colors"
+                className="text-[10px] font-mono text-gray-400 hover:text-white truncate max-w-[120px] flex-shrink-0 px-1 py-0.5 rounded hover:bg-border-subtle transition-colors"
                 title={span.name}
               >
                 {span.name}

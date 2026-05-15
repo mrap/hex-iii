@@ -16,7 +16,7 @@ export function ViewSwitcher({ currentView, onViewChange }: ViewSwitcherProps) {
   ]
 
   return (
-    <div className="inline-flex items-center gap-0.5 bg-[#0A0A0A] rounded-md p-0.5 border border-[#1D1D1D]">
+    <div className="inline-flex items-center gap-0.5 bg-sidebar rounded-md p-0.5 border border-border-subtle">
       {views.map(({ id, label, icon: Icon }) => {
         const isActive = currentView === id
         return (
@@ -28,8 +28,8 @@ export function ViewSwitcher({ currentView, onViewChange }: ViewSwitcherProps) {
               flex items-center gap-1.5 px-3 py-1.5 rounded-[5px] transition-all duration-150
               ${
                 isActive
-                  ? 'bg-[#F3F724] text-black font-semibold shadow-[0_0_8px_rgba(243,247,36,0.15)]'
-                  : 'text-gray-500 hover:text-gray-300 hover:bg-[#141414]'
+                  ? 'bg-accent text-black font-semibold shadow-[0_0_8px_rgba(243,247,36,0.15)]'
+                  : 'text-gray-500 hover:text-gray-300 hover:bg-elevated'
               }
             `}
           >

@@ -1,3 +1,22 @@
+/**
+ * Flame-graph view: spans rendered to a <canvas> for performance.
+ *
+ * THEMING NOTE — hex literals below (line ~22, ~164, ~194, ~339, etc.)
+ * are CSS color strings passed into `ctx.fillStyle` / `ctx.strokeStyle`.
+ * Canvas does not pick up Tailwind classes or CSS custom properties
+ * directly. To make this view re-theme under `[data-theme="light"]`,
+ * a future refactor should:
+ *
+ *   const root = getComputedStyle(document.documentElement)
+ *   const accent  = root.getPropertyValue('--accent').trim()
+ *   const success = root.getPropertyValue('--success').trim()
+ *   // ... pass into draw calls
+ *
+ * Recompute on theme change via a `theme` context or a
+ * `MutationObserver` on `<html data-theme>`. Until then, FlameGraph
+ * renders in fixed dark-mode colors regardless of host theme.
+ */
+
 import { Minus, Plus, RotateCcw } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
 import { getServiceColor, SPAN_STATUS_COLORS } from '@/lib/traceColors'
@@ -464,7 +483,7 @@ export function FlameGraph({ data, onSpanClick, selectedSpanId }: FlameGraphProp
   return (
     <div className="flex flex-col h-full">
       {/* Compact toolbar */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-[#1D1D1D] bg-[#0A0A0A] flex-shrink-0">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-border-subtle bg-sidebar flex-shrink-0">
         <div className="flex items-center gap-1.5">
           <span className="text-[10px] text-gray-500 uppercase tracking-wider mr-1">Color</span>
           <button
@@ -472,8 +491,8 @@ export function FlameGraph({ data, onSpanClick, selectedSpanId }: FlameGraphProp
             onClick={() => dispatch({ type: 'SET_COLOR_BY', colorBy: 'status' })}
             className={`px-2 py-0.5 text-[10px] rounded transition-colors ${
               colorBy === 'status'
-                ? 'bg-[#F3F724] text-black font-semibold'
-                : 'bg-[#141414] text-gray-500 hover:text-gray-300 border border-[#1D1D1D]'
+                ? 'bg-accent text-black font-semibold'
+                : 'bg-elevated text-gray-500 hover:text-gray-300 border border-border-subtle'
             }`}
           >
             Status
@@ -483,15 +502,15 @@ export function FlameGraph({ data, onSpanClick, selectedSpanId }: FlameGraphProp
             onClick={() => dispatch({ type: 'SET_COLOR_BY', colorBy: 'service' })}
             className={`px-2 py-0.5 text-[10px] rounded transition-colors ${
               colorBy === 'service'
-                ? 'bg-[#F3F724] text-black font-semibold'
-                : 'bg-[#141414] text-gray-500 hover:text-gray-300 border border-[#1D1D1D]'
+                ? 'bg-accent text-black font-semibold'
+                : 'bg-elevated text-gray-500 hover:text-gray-300 border border-border-subtle'
             }`}
           >
             Service
           </button>
 
           {/* Inline legend */}
-          <div className="w-px h-3.5 bg-[#1D1D1D] mx-1.5" />
+          <div className="w-px h-3.5 bg-border-subtle mx-1.5" />
           {colorBy === 'status' ? (
             <div className="flex items-center gap-2.5">
               <div className="flex items-center gap-1">
@@ -539,7 +558,7 @@ export function FlameGraph({ data, onSpanClick, selectedSpanId }: FlameGraphProp
             type="button"
             onClick={zoomOut}
             disabled={zoomLevel <= 1}
-            className="p-1 rounded hover:bg-[#141414] text-gray-500 hover:text-gray-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            className="p-1 rounded hover:bg-elevated text-gray-500 hover:text-gray-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             title="Zoom out"
           >
             <Minus className="w-3 h-3" />
@@ -548,7 +567,7 @@ export function FlameGraph({ data, onSpanClick, selectedSpanId }: FlameGraphProp
             type="button"
             onClick={zoomIn}
             disabled={zoomLevel >= 20}
-            className="p-1 rounded hover:bg-[#141414] text-gray-500 hover:text-gray-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            className="p-1 rounded hover:bg-elevated text-gray-500 hover:text-gray-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             title="Zoom in"
           >
             <Plus className="w-3 h-3" />
@@ -557,7 +576,7 @@ export function FlameGraph({ data, onSpanClick, selectedSpanId }: FlameGraphProp
             type="button"
             onClick={handleReset}
             disabled={zoomLevel === 1 && panOffset === 0}
-            className="p-1 rounded hover:bg-[#141414] text-gray-500 hover:text-gray-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            className="p-1 rounded hover:bg-elevated text-gray-500 hover:text-gray-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             title="Reset view"
           >
             <RotateCcw className="w-3 h-3" />
@@ -567,7 +586,7 @@ export function FlameGraph({ data, onSpanClick, selectedSpanId }: FlameGraphProp
 
       {/* Minimap (only when zoomed) */}
       {zoomLevel > 1 && (
-        <div className="border-b border-[#1D1D1D] flex-shrink-0 px-0">
+        <div className="border-b border-border-subtle flex-shrink-0 px-0">
           <canvas
             ref={minimapRef}
             onClick={handleMinimapClick}
@@ -598,7 +617,7 @@ export function FlameGraph({ data, onSpanClick, selectedSpanId }: FlameGraphProp
             top: tooltipPos.y + 12,
           }}
         >
-          <div className="bg-[#141414] border border-[#2D2D2D] rounded-lg px-3 py-2.5 shadow-xl shadow-black/50 min-w-[200px] max-w-[280px]">
+          <div className="bg-elevated border border-border rounded-lg px-3 py-2.5 shadow-xl shadow-black/50 min-w-[200px] max-w-[280px]">
             {/* Span name */}
             <div className="font-semibold text-[12px] text-white leading-tight mb-1.5 break-all">
               {hoveredNode.span.name}
@@ -624,7 +643,7 @@ export function FlameGraph({ data, onSpanClick, selectedSpanId }: FlameGraphProp
             <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px]">
               <div className="flex justify-between">
                 <span className="text-gray-500">Duration</span>
-                <span className="text-[#F3F724] font-mono font-semibold">
+                <span className="text-accent font-mono font-semibold">
                   {formatDuration(hoveredNode.span.duration_ms)}
                 </span>
               </div>
@@ -650,9 +669,9 @@ export function FlameGraph({ data, onSpanClick, selectedSpanId }: FlameGraphProp
             </div>
 
             {/* Trace percentage bar */}
-            <div className="mt-2 h-1 rounded-full bg-[#1D1D1D] overflow-hidden">
+            <div className="mt-2 h-1 rounded-full bg-border-subtle overflow-hidden">
               <div
-                className="h-full rounded-full bg-[#F3F724] transition-all duration-150"
+                className="h-full rounded-full bg-accent transition-all duration-150"
                 style={{ width: `${Math.max(1, Number.parseFloat(tracePercent))}%`, opacity: 0.7 }}
               />
             </div>
@@ -670,7 +689,7 @@ export function FlameGraph({ data, onSpanClick, selectedSpanId }: FlameGraphProp
 
       {/* Keyboard hint */}
       {zoomLevel <= 1 && (
-        <div className="flex-shrink-0 px-4 py-1.5 text-[9px] text-gray-600 text-center border-t border-[#1D1D1D]">
+        <div className="flex-shrink-0 px-4 py-1.5 text-[9px] text-gray-600 text-center border-t border-border-subtle">
           Ctrl+Scroll to zoom | Scroll to pan | Click to select
         </div>
       )}
