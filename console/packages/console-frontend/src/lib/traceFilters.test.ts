@@ -112,18 +112,14 @@ describe('buildFilterParams — time range', () => {
   const t1 = 1_700_000_001_000
 
   it('passes start/end through unchanged when start <= end', () => {
-    const { params, warnings } = buildFilterParams(
-      makeFilters({ startTime: t0, endTime: t1 }),
-    )
+    const { params, warnings } = buildFilterParams(makeFilters({ startTime: t0, endTime: t1 }))
     expect(params.start_time).toBe(t0)
     expect(params.end_time).toBe(t1)
     expect(warnings.timeRangeSwapped).toBeUndefined()
   })
 
   it('swaps start/end and flags warning when inverted', () => {
-    const { params, warnings } = buildFilterParams(
-      makeFilters({ startTime: t1, endTime: t0 }),
-    )
+    const { params, warnings } = buildFilterParams(makeFilters({ startTime: t1, endTime: t0 }))
     expect(params.start_time).toBe(t0)
     expect(params.end_time).toBe(t1)
     expect(warnings.timeRangeSwapped).toBe(true)

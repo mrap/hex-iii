@@ -7,12 +7,7 @@
 
 import { describe, expect, it } from 'vitest'
 import type { TraceGroup } from '../api/observability/traces'
-import {
-  groupByLabel,
-  groupHeading,
-  isGroupByUnavailable,
-  summarizeGroup,
-} from './groupTraces'
+import { groupByLabel, groupHeading, isGroupByUnavailable, summarizeGroup } from './groupTraces'
 
 function makeGroup(overrides: Partial<TraceGroup> = {}): TraceGroup {
   return {

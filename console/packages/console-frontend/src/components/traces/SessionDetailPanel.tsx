@@ -31,18 +31,17 @@
 // keeping the right-side span detail panel working unchanged.
 
 import { useQuery } from '@tanstack/react-query'
+import type { ISdk } from 'iii-browser-sdk'
 import { ChevronDown, ChevronRight, Clock, Loader2, X } from 'lucide-react'
 import { useState } from 'react'
-
-import { fetchTraceTree, type TraceGroup, type TraceTreeResponse } from '@/api/observability/traces'
 import { useEngineSdk } from '@/api/engine-sdk-provider'
+import { fetchTraceTree, type TraceGroup, type TraceTreeResponse } from '@/api/observability/traces'
 import { WaterfallChart } from '@/components/traces/WaterfallChart'
 import {
   treeToWaterfallData,
   type VisualizationSpan,
   type WaterfallData,
 } from '@/lib/traceTransform'
-import type { ISdk } from 'iii-browser-sdk'
 
 interface SessionDetailPanelProps {
   group: TraceGroup
@@ -192,9 +191,7 @@ function TraceCard({
               Loading trace…
             </div>
           )}
-          {errorMessage && (
-            <div className="px-4 py-3 text-[11px] text-error">{errorMessage}</div>
-          )}
+          {errorMessage && <div className="px-4 py-3 text-[11px] text-error">{errorMessage}</div>}
           {waterfall && (
             <WaterfallChart
               data={waterfall}

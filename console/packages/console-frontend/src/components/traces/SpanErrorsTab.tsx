@@ -57,9 +57,7 @@ export function SpanErrorsTab({ span }: SpanErrorsTabProps) {
           </div>
           <div className="flex-1 min-w-0">
             {displayType && (
-              <div className="text-sm font-semibold text-error font-mono mb-1">
-                {displayType}
-              </div>
+              <div className="text-sm font-semibold text-error font-mono mb-1">{displayType}</div>
             )}
             {displayMessage && (
               <div className="text-sm text-gray-300 break-words leading-relaxed">

@@ -1,10 +1,11 @@
-import { describe, expect, it, vi } from 'vitest'
 import type { ISdk, TriggerRequest } from 'iii-browser-sdk'
+import { describe, expect, it, vi } from 'vitest'
 import { clearTraces, fetchTraces, fetchTracesGroupBy, fetchTraceTree } from './traces'
 
-function makeSdkStub(
-  responder: (req: TriggerRequest<unknown>) => unknown | Promise<unknown>,
-): { sdk: ISdk; trigger: ReturnType<typeof vi.fn> } {
+function makeSdkStub(responder: (req: TriggerRequest<unknown>) => unknown | Promise<unknown>): {
+  sdk: ISdk
+  trigger: ReturnType<typeof vi.fn>
+} {
   const trigger = vi.fn(async (req: TriggerRequest<unknown>) => responder(req))
   // Only `trigger` is exercised; the rest of ISdk is unused in these tests.
   const sdk = { trigger } as unknown as ISdk
@@ -200,8 +201,8 @@ describe('fetchTracesGroupBy', () => {
       throw new Error('function_not_found: engine::traces::group_by')
     })
 
-    await expect(
-      fetchTracesGroupBy(sdk, { attribute: 'iii.message.id' }),
-    ).rejects.toThrow('function_not_found: engine::traces::group_by')
+    await expect(fetchTracesGroupBy(sdk, { attribute: 'iii.message.id' })).rejects.toThrow(
+      'function_not_found: engine::traces::group_by',
+    )
   })
 })

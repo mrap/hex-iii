@@ -550,7 +550,8 @@ export function WaterfallChart({ data, onSpanClick, selectedSpanId }: WaterfallC
                   style={{
                     background:
                       'linear-gradient(90deg, transparent 0%, transparent 25%, var(--border-subtle) 25%, var(--border-subtle) 25.1%, transparent 25.1%, transparent 50%, var(--border-subtle) 50%, var(--border-subtle) 50.1%, transparent 50.1%, transparent 75%, var(--border-subtle) 75%, var(--border-subtle) 75.1%, transparent 75.1%)',
-                  }}>
+                  }}
+                >
                   <div
                     className={`
                       absolute h-4 top-1 rounded-[3px] min-w-[3px] transition-all duration-150

@@ -34,7 +34,7 @@ export interface UseTraceDataReturn {
   hasOtelConfigured: boolean
   isQueryLoading: boolean
   refetch: () => void
-  isHoveredRef: React.MutableRefObject<boolean>
+  isHoveredRef: React.RefObject<boolean>
   flushPendingTraces: () => void
 }
 

@@ -130,37 +130,40 @@ function TracesPage() {
     isPaused,
   })
 
-  const loadTraceSpans = useCallback(async (traceId: string) => {
-    setIsLoadingSpans(true)
-    setSpansError(null)
-    setWaterfallData(null)
+  const loadTraceSpans = useCallback(
+    async (traceId: string) => {
+      setIsLoadingSpans(true)
+      setSpansError(null)
+      setWaterfallData(null)
 
-    try {
-      const data = await fetchTraceTree(sdk, traceId)
+      try {
+        const data = await fetchTraceTree(sdk, traceId)
 
-      if (data.roots && data.roots.length > 0) {
-        const wfData = treeToWaterfallData(data.roots)
+        if (data.roots && data.roots.length > 0) {
+          const wfData = treeToWaterfallData(data.roots)
 
-        if (wfData) {
-          setWaterfallData(wfData)
+          if (wfData) {
+            setWaterfallData(wfData)
+          } else {
+            setSpansError('Failed to process span data')
+          }
         } else {
-          setSpansError('Failed to process span data')
+          setSpansError('No span data available for this trace')
         }
-      } else {
-        setSpansError('No span data available for this trace')
+      } catch (error) {
+        // Surface the stack to the devtools console only in dev — production
+        // users see the `spansError` UI state instead.
+        if (import.meta.env.DEV) {
+          // eslint-disable-next-line no-console
+          console.error('[Traces] Failed to load trace tree:', error)
+        }
+        setSpansError(error instanceof Error ? error.message : 'Failed to load trace details')
+      } finally {
+        setIsLoadingSpans(false)
       }
-    } catch (error) {
-      // Surface the stack to the devtools console only in dev — production
-      // users see the `spansError` UI state instead.
-      if (import.meta.env.DEV) {
-        // eslint-disable-next-line no-console
-        console.error('[Traces] Failed to load trace tree:', error)
-      }
-      setSpansError(error instanceof Error ? error.message : 'Failed to load trace details')
-    } finally {
-      setIsLoadingSpans(false)
-    }
-  }, [sdk])
+    },
+    [sdk],
+  )
 
   const selectTrace = useCallback(
     (traceId: string | null) => {
@@ -509,94 +512,96 @@ function TracesPage() {
                 />
               ) : (
                 <>
-              {isLoadingSpans && (
-                <div className="flex-1 flex flex-col p-4 gap-3">
-                  <div className="flex items-center gap-2">
-                    <Skeleton className="w-4 h-4 rounded-full" />
-                    <Skeleton className="h-4 w-32" />
-                    <Skeleton className="h-4 w-20 ml-auto" />
-                  </div>
-                  {(['tr-p-sk-0', 'tr-p-sk-1', 'tr-p-sk-2', 'tr-p-sk-3', 'tr-p-sk-4'] as const).map(
-                    (sk) => (
-                      <div key={sk} className="flex items-center gap-2">
-                        <Skeleton className="h-6 w-full" />
+                  {isLoadingSpans && (
+                    <div className="flex-1 flex flex-col p-4 gap-3">
+                      <div className="flex items-center gap-2">
+                        <Skeleton className="w-4 h-4 rounded-full" />
+                        <Skeleton className="h-4 w-32" />
+                        <Skeleton className="h-4 w-20 ml-auto" />
                       </div>
-                    ),
-                  )}
-                </div>
-              )}
-
-              {!isLoadingSpans && spansError && (
-                <div className="flex-1 flex flex-col items-center justify-center p-8">
-                  <div className="w-10 h-10 mb-3 rounded-lg bg-dark-gray border border-border flex items-center justify-center">
-                    <AlertCircle className="w-5 h-5 text-error" />
-                  </div>
-                  <div className="text-xs font-medium mb-1 text-error">Failed to load trace</div>
-                  <div className="text-[10px] text-muted text-center mb-3 max-w-xs">
-                    {spansError}
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => loadTraceSpans(selectedTrace.traceId)}
-                    className="text-[10px] h-6"
-                  >
-                    <RefreshCw className="w-3 h-3 mr-1" />
-                    Retry
-                  </Button>
-                </div>
-              )}
-
-              {!isLoadingSpans && !spansError && waterfallData && (
-                <>
-                  <TraceHeader
-                    data={waterfallData}
-                    traceId={selectedTrace.traceId}
-                    onClose={() => selectTrace(null)}
-                    onSpanClick={setSelectedSpan}
-                  />
-
-                  <div className="border-b border-border-subtle px-4 py-2.5">
-                    <ViewSwitcher currentView={activeView} onViewChange={setActiveView} />
-                  </div>
-
-                  <div className="flex-1 overflow-auto min-h-0">
-                    {activeView === 'waterfall' && (
-                      <WaterfallChart
-                        data={waterfallData}
-                        onSpanClick={setSelectedSpan}
-                        selectedSpanId={selectedSpan?.span_id}
-                      />
-                    )}
-
-                    {activeView === 'flamegraph' && (
-                      <FlameGraph
-                        data={waterfallData}
-                        onSpanClick={setSelectedSpan}
-                        selectedSpanId={selectedSpan?.span_id}
-                      />
-                    )}
-
-                    {activeView === 'map' && (
-                      <TraceMap data={waterfallData} onSpanClick={setSelectedSpan} />
-                    )}
-
-                    {activeView === 'flow' && (
-                      <FlowView
-                        data={waterfallData}
-                        onSpanClick={setSelectedSpan}
-                        selectedSpanId={selectedSpan?.span_id}
-                      />
-                    )}
-                  </div>
-
-                  {activeView !== 'flow' && (
-                    <div className="border-t border-border-subtle flex-shrink-0">
-                      <ServiceBreakdown data={waterfallData} />
+                      {(
+                        ['tr-p-sk-0', 'tr-p-sk-1', 'tr-p-sk-2', 'tr-p-sk-3', 'tr-p-sk-4'] as const
+                      ).map((sk) => (
+                        <div key={sk} className="flex items-center gap-2">
+                          <Skeleton className="h-6 w-full" />
+                        </div>
+                      ))}
                     </div>
                   )}
-                </>
-              )}
+
+                  {!isLoadingSpans && spansError && (
+                    <div className="flex-1 flex flex-col items-center justify-center p-8">
+                      <div className="w-10 h-10 mb-3 rounded-lg bg-dark-gray border border-border flex items-center justify-center">
+                        <AlertCircle className="w-5 h-5 text-error" />
+                      </div>
+                      <div className="text-xs font-medium mb-1 text-error">
+                        Failed to load trace
+                      </div>
+                      <div className="text-[10px] text-muted text-center mb-3 max-w-xs">
+                        {spansError}
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => loadTraceSpans(selectedTrace.traceId)}
+                        className="text-[10px] h-6"
+                      >
+                        <RefreshCw className="w-3 h-3 mr-1" />
+                        Retry
+                      </Button>
+                    </div>
+                  )}
+
+                  {!isLoadingSpans && !spansError && waterfallData && (
+                    <>
+                      <TraceHeader
+                        data={waterfallData}
+                        traceId={selectedTrace.traceId}
+                        onClose={() => selectTrace(null)}
+                        onSpanClick={setSelectedSpan}
+                      />
+
+                      <div className="border-b border-border-subtle px-4 py-2.5">
+                        <ViewSwitcher currentView={activeView} onViewChange={setActiveView} />
+                      </div>
+
+                      <div className="flex-1 overflow-auto min-h-0">
+                        {activeView === 'waterfall' && (
+                          <WaterfallChart
+                            data={waterfallData}
+                            onSpanClick={setSelectedSpan}
+                            selectedSpanId={selectedSpan?.span_id}
+                          />
+                        )}
+
+                        {activeView === 'flamegraph' && (
+                          <FlameGraph
+                            data={waterfallData}
+                            onSpanClick={setSelectedSpan}
+                            selectedSpanId={selectedSpan?.span_id}
+                          />
+                        )}
+
+                        {activeView === 'map' && (
+                          <TraceMap data={waterfallData} onSpanClick={setSelectedSpan} />
+                        )}
+
+                        {activeView === 'flow' && (
+                          <FlowView
+                            data={waterfallData}
+                            onSpanClick={setSelectedSpan}
+                            selectedSpanId={selectedSpan?.span_id}
+                          />
+                        )}
+                      </div>
+
+                      {activeView !== 'flow' && (
+                        <div className="border-t border-border-subtle flex-shrink-0">
+                          <ServiceBreakdown data={waterfallData} />
+                        </div>
+                      )}
+                    </>
+                  )}
                 </>
               )}
             </div>

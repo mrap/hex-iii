@@ -55,8 +55,8 @@ export function TraceGroupsView({
         <div className="max-w-md">
           The engine doesn't expose <code className="text-yellow">engine::traces::group_by</code>.
           Either the engine is older than the version that introduced it, or the
-          <code className="text-yellow"> iii-observability</code> worker is not configured.
-          Switch &quot;Group by&quot; back to &quot;No grouping&quot; to use the flat trace list.
+          <code className="text-yellow"> iii-observability</code> worker is not configured. Switch
+          &quot;Group by&quot; back to &quot;No grouping&quot; to use the flat trace list.
         </div>
       </div>
     )
@@ -118,9 +118,7 @@ function GroupRow({ attribute, group, isSelected, onClick }: GroupRowProps) {
       type="button"
       onClick={onClick}
       className={`flex items-center gap-2 px-3 py-2 text-left border-b border-border-subtle/60 transition-colors ${
-        isSelected
-          ? 'bg-accent/[0.06] border-l-2 border-l-accent'
-          : 'hover:bg-border-subtle/50'
+        isSelected ? 'bg-accent/[0.06] border-l-2 border-l-accent' : 'hover:bg-border-subtle/50'
       }`}
       title={`${heading} (${group.trace_ids.length} trace${group.trace_ids.length === 1 ? '' : 's'})`}
     >

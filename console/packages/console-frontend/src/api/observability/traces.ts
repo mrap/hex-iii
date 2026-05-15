@@ -198,10 +198,7 @@ export async function fetchTraces(
   }
 }
 
-export async function fetchTraceTree(
-  sdk: ISdk,
-  traceId: string,
-): Promise<TraceTreeResponse> {
+export async function fetchTraceTree(sdk: ISdk, traceId: string): Promise<TraceTreeResponse> {
   try {
     return await sdk.trigger<{ trace_id: string }, TraceTreeResponse>({
       function_id: FN_TREE,

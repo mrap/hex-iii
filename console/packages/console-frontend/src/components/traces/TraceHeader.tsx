@@ -124,9 +124,7 @@ export function TraceHeader({ data, traceId, onClose, onSpanClick }: TraceHeader
         {hasErrors && (
           <div className="flex items-center gap-1 px-2 py-0.5 bg-error/10 border border-error/20 rounded">
             <AlertCircle className="w-2.5 h-2.5 text-error" />
-            <span className="text-[10px] font-mono font-semibold text-error">
-              {errorCount} err
-            </span>
+            <span className="text-[10px] font-mono font-semibold text-error">{errorCount} err</span>
           </div>
         )}
       </div>

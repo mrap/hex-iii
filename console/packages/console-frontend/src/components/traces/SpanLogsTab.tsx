@@ -20,9 +20,7 @@ export function SpanLogsTab({ span }: SpanLogsTabProps) {
           <Clock className="w-5 h-5 text-muted" />
         </div>
         <p className="text-sm text-secondary">No events recorded</p>
-        <p className="text-[11px] text-muted mt-1">
-          This span has no logged events or exceptions
-        </p>
+        <p className="text-[11px] text-muted mt-1">This span has no logged events or exceptions</p>
       </div>
     )
   }

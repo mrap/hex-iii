@@ -128,24 +128,17 @@ export function useTraceFilters() {
 
   const getActiveFilterCount = useCallback(() => countActiveFilters(filters), [filters])
 
-  // Filter-only params (excludes pagination) -- stable reference when only page changes.
-  // Delegation to `buildFilterParams` keeps the swap-validation logic
-  // pure and testable (see lib/traceFilters.test.ts).
+  // Filter-only params (excludes pagination). Recomputes on any
+  // `filters` identity change — including page/pageSize — but the
+  // result identity downstream isn't load-bearing: TanStack Query
+  // compares queryKeys structurally, so identical content (e.g. when
+  // only page changed) doesn't trigger a refetch. Delegation to
+  // `buildFilterParams` keeps the swap-validation logic pure and
+  // testable (see lib/traceFilters.test.ts).
   const { filterOnlyParams, computedWarnings } = useMemo(() => {
     const { params, warnings } = buildFilterParams(filters)
     return { filterOnlyParams: params, computedWarnings: warnings }
-  }, [
-    filters.serviceName,
-    filters.operationName,
-    filters.status,
-    filters.minDurationMs,
-    filters.maxDurationMs,
-    filters.startTime,
-    filters.endTime,
-    filters.attributes,
-    filters.sortBy,
-    filters.sortOrder,
-  ])
+  }, [filters])
 
   // Full params including pagination offset/limit
   const apiParams = useMemo(

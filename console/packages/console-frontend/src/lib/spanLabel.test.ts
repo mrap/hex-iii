@@ -65,9 +65,7 @@ describe('formatSpanLabel', () => {
     // produce just `charge`. The verb strip must happen first because
     // the service prefix doesn't appear at the start of the original
     // name.
-    expect(formatSpanLabel({ name: 'call billing.charge', service_name: 'billing' })).toBe(
-      'charge',
-    )
+    expect(formatSpanLabel({ name: 'call billing.charge', service_name: 'billing' })).toBe('charge')
   })
 
   it('does NOT strip a service-name prefix that is just a substring (only leading)', () => {
@@ -85,9 +83,9 @@ describe('formatSpanLabel', () => {
   it('only strips the first matching verb prefix, not chained ones', () => {
     // Defensive: a name like `call handle_invocation foo` is pathological
     // but should still produce a sensible result (strip outermost only).
-    expect(
-      formatSpanLabel({ name: 'call handle_invocation foo', service_name: 'iii' }),
-    ).toBe('handle_invocation foo')
+    expect(formatSpanLabel({ name: 'call handle_invocation foo', service_name: 'iii' })).toBe(
+      'handle_invocation foo',
+    )
   })
 })
 

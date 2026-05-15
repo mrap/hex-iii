@@ -6,11 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import type { StoredSpan } from '../api/observability/traces'
 import type { TraceListItem } from '../hooks/useTraceData'
-import {
-  fingerprintTraceList,
-  mapSpanToListItem,
-  normalizeSpanAttributes,
-} from './traceListItem'
+import { fingerprintTraceList, mapSpanToListItem, normalizeSpanAttributes } from './traceListItem'
 
 const NS_PER_MS = 1_000_000
 
@@ -108,26 +104,30 @@ describe('mapSpanToListItem — basic shape', () => {
 })
 
 describe('mapSpanToListItem — status normalization', () => {
-  it.each(['error', 'Error', 'ERROR', 'errOr'])(
-    'maps case variant %s of "error" to status="error"',
-    (raw) => {
-      expect(mapSpanToListItem(makeSpan({ status: raw })).status).toBe('error')
-    },
-  )
+  it.each([
+    'error',
+    'Error',
+    'ERROR',
+    'errOr',
+  ])('maps case variant %s of "error" to status="error"', (raw) => {
+    expect(mapSpanToListItem(makeSpan({ status: raw })).status).toBe('error')
+  })
 
-  it.each(['OK', 'ok', 'unset', 'UNSET', '', 'something_else'])(
-    'maps non-error status %s to status="ok"',
-    (raw) => {
-      expect(mapSpanToListItem(makeSpan({ status: raw })).status).toBe('ok')
-    },
-  )
+  it.each([
+    'OK',
+    'ok',
+    'unset',
+    'UNSET',
+    '',
+    'something_else',
+  ])('maps non-error status %s to status="ok"', (raw) => {
+    expect(mapSpanToListItem(makeSpan({ status: raw })).status).toBe('ok')
+  })
 })
 
 describe('mapSpanToListItem — semantic attributes', () => {
   it('reads functionId from OTel faas.invoked_name', () => {
-    const out = mapSpanToListItem(
-      makeSpan({ attributes: [['faas.invoked_name', 'fn-billing']] }),
-    )
+    const out = mapSpanToListItem(makeSpan({ attributes: [['faas.invoked_name', 'fn-billing']] }))
     expect(out.functionId).toBe('fn-billing')
   })
 
@@ -164,7 +164,9 @@ describe('mapSpanToListItem — semantic attributes', () => {
   it('works with the plain-object attributes shape too', () => {
     const out = mapSpanToListItem(
       makeSpan({
-        attributes: { 'faas.invoked_name': 'fn-from-object' } as unknown as StoredSpan['attributes'],
+        attributes: {
+          'faas.invoked_name': 'fn-from-object',
+        } as unknown as StoredSpan['attributes'],
       }),
     )
     expect(out.functionId).toBe('fn-from-object')
