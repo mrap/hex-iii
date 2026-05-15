@@ -110,18 +110,37 @@ jobs:
             fi
 
             local new_base
+            local apply_bump=0
             if [[ "$PRERELEASE" != "none" && "$current_pre" == "$PRERELEASE" ]]; then
-              # Same pre-release channel: keep base, increment counter
-              # e.g. 0.12.0-next.1 → 0.12.0-next.2
-              new_base="$base"
+              # Same pre-release channel.
+              # bump=patch (default): keep base, increment counter
+              #   e.g. 0.12.0-next.1 → 0.12.0-next.2
+              # bump=minor/major: bump base off the pre-release base, reset counter
+              #   e.g. 0.12.0-next.1 + minor → 0.13.0-next.1
+              if [[ "$bump_type" == "patch" ]]; then
+                new_base="$base"
+              else
+                apply_bump=1
+              fi
             elif [[ "$PRERELEASE" == "none" && -n "$current_pre" ]]; then
-              # Promoting pre-release to stable: use base as-is
-              # e.g. 0.12.0-next.3 → 0.12.0
-              new_base="$base"
+              # Promoting pre-release to stable.
+              # bump=patch (default): promote pending pre-release base as-is
+              #   e.g. 0.12.0-next.3 → 0.12.0
+              # bump=minor/major: caller changed intent, bump off the base
+              #   e.g. 0.11.7-next.4 + minor → 0.12.0
+              if [[ "$bump_type" == "patch" ]]; then
+                new_base="$base"
+              else
+                apply_bump=1
+              fi
             else
               # Stable → stable bump, or stable → new pre-release
               # e.g. 0.11.0 + minor → 0.12.0
               # e.g. 0.11.0 + minor + next → 0.12.0-next.1
+              apply_bump=1
+            fi
+
+            if [[ "$apply_bump" -eq 1 ]]; then
               case "$bump_type" in
                 major) major=$((major + 1)); minor=0; patch=0 ;;
                 minor) minor=$((minor + 1)); patch=0 ;;
