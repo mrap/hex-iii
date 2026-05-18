@@ -110,18 +110,19 @@ jobs:
             fi
 
             local new_base
-            if [[ "$PRERELEASE" != "none" && "$current_pre" == "$PRERELEASE" ]]; then
-              # Same pre-release channel: keep base, increment counter
-              # e.g. 0.12.0-next.1 → 0.12.0-next.2
+            if [[ "$PRERELEASE" != "none" && "$current_pre" == "$PRERELEASE" && "$bump_type" == "patch" ]]; then
+              # Same pre-release channel + patch: keep base, increment counter
+              # e.g. 0.12.0-next.1 + patch → 0.12.0-next.2
               new_base="$base"
             elif [[ "$PRERELEASE" == "none" && -n "$current_pre" ]]; then
               # Promoting pre-release to stable: use base as-is
               # e.g. 0.12.0-next.3 → 0.12.0
               new_base="$base"
             else
-              # Stable → stable bump, or stable → new pre-release
-              # e.g. 0.11.0 + minor → 0.12.0
-              # e.g. 0.11.0 + minor + next → 0.12.0-next.1
+              # Apply the requested bump to the base. Covers:
+              # - Stable → stable: 0.11.0 + minor → 0.12.0
+              # - Stable → new pre-release: 0.11.0 + minor + next → 0.12.0-next.1
+              # - Same pre-release channel + minor/major: 0.11.7-next.2 + minor + next → 0.12.0-next.1
               case "$bump_type" in
                 major) major=$((major + 1)); minor=0; patch=0 ;;
                 minor) minor=$((minor + 1)); patch=0 ;;
