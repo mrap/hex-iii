@@ -15,16 +15,16 @@ trigger on an existing trigger type such as: [`http`](https://workers.iii.dev/wo
 [`state` changes](https://workers.iii.dev/workers/iii-state), and any other event source in the
 system.
 
-Less often, you register a new trigger type from your worker so other workers can bind their
-functions to events your worker emits.
-
-This page covers both from the worker-author perspective.
-
 <Note>
   For the caller-side mechanics (direct invocation with `worker.trigger` or `iii trigger`, the
   `TriggerAction` variants, gating with conditions, multiple bindings per function), see [Using iii
   / Triggers](/using-iii/triggers).
 </Note>
+
+Less often, you register a new trigger type from your worker so other workers can bind their
+functions to events your worker emits.
+
+This page covers both from the worker-author perspective.
 
 <Note>
   For the underlying model, see [Understanding iii / Triggers](/understanding-iii/triggers).
@@ -107,6 +107,8 @@ A trigger type is two things bundled together:
 You declare the trigger type once at startup with
 `worker.registerTriggerType({ id, description }, handler)`.
 
+{/* TODO: Review against real SDK/CLI surface (now, and post-sdk rework, separately) */}
+
 The `TriggerHandler` interface **you implement** exposes two callbacks. The engine invokes them on
 your publisher worker whenever a consumer binds or unbinds:
 
@@ -115,26 +117,30 @@ your publisher worker whenever a consumer binds or unbinds:
   consumer-supplied `config` matching the shape your type accepts. Stash it.
 - `unregisterTrigger(config)`: Runs on unbind. Drop it from your table.
 
-The `TriggerTypeRef` handle that **`registerTriggerType` returns to you** has a convenience method
-for unregistering the trigger at any time during runtime:
+The trigger type can be torn down at any point during runtime with
+`worker.unregisterTriggerType(...)` (or `worker.unregister_trigger_type(...)` in Python and Rust).
+See the [Unregister](#unregister) section below for per-language signatures.
 
-- `worker.unregister_trigger_type(id)`: Remove the trigger type during runtime.
+### Example: A mini `iii-http` from scratch
 
-### Example: a mini `iii-http` from scratch
+{/* TODO: Review against real SDK/CLI surface (now, and post-sdk rework, separately) */}
 
 The example below sketches a tiny version of [iii-http](https://workers.iii.dev/workers/iii-http),
-the worker that publishes the real built-in `http` trigger type. The publisher worker (1) declares
-an HTTP-shaped trigger type called `mini-http`, (2) maintains a `bindings` map of
-`{ trigger id → function_id, method+path }` as consumers bind/unbind, and (3) is then ready to look
-up the right binding when an HTTP request lands. Step 3 (actually firing the bound function) is
-covered in [Dispatch events to bound functions](#dispatch-events-to-bound-functions) below.
+the worker that publishes the real built-in `http` trigger type. The publisher worker:
+
+1. Declares an HTTP-shaped trigger type called `mini-http`
+1. Maintains a `bindings` map of `{ trigger id → function_id, method+path }` as consumers
+   bind/unbind
+1. Is then ready to look up the right binding when an HTTP request is received. Firing the bound
+   function is covered in [Dispatch events to bound functions](#dispatch-events-to-bound-functions)
+   below.
 
 <Accordion title="Example: declare a `mini-http` trigger type">
   <Tabs>
     <Tab title="Node / TypeScript">
       ```typescript
       import { registerWorker } from "iii-sdk";
-      import type { TriggerConfig, TriggerHandler, TriggerTypeRef } from "iii-sdk";
+      import type { TriggerConfig, TriggerHandler } from "iii-sdk";
 
       const worker = registerWorker(process.env.III_URL);
 
@@ -154,17 +160,9 @@ covered in [Dispatch events to bound functions](#dispatch-events-to-bound-functi
         },
       };
 
-      const http: TriggerTypeRef<MiniHttpConfig> = worker.registerTriggerType(
+      worker.registerTriggerType(
         { id: "mini-http", description: "Routes HTTP requests to bound functions" },
         httpHandler,
-      );
-
-      // Optional: the publisher worker self-binds one of its own functions
-      // using the handle, so it doesn't have to repeat `type: "mini-http"`.
-      http.registerFunction(
-        "diagnostics::ping",
-        async () => ({ ok: true }),
-        { api_path: "/ping", http_method: "GET" },
       );
       ```
     </Tab>
@@ -193,22 +191,12 @@ covered in [Dispatch events to bound functions](#dispatch-events-to-bound-functi
           async def unregister_trigger(self, config: TriggerConfig) -> None:
               bindings.pop(config.id, None)
 
-      http = worker.register_trigger_type(
+      worker.register_trigger_type(
           RegisterTriggerTypeInput(
               id="mini-http",
               description="Routes HTTP requests to bound functions",
           ),
           HttpHandler(),
-      )
-
-      async def ping(_data: dict) -> dict:
-          return {"ok": True}
-
-      # Optional: the publisher worker self-binds via the handle.
-      http.register_function(
-          "diagnostics::ping",
-          ping,
-          {"api_path": "/ping", "http_method": "GET"},
       )
       ```
     </Tab>
@@ -241,7 +229,7 @@ covered in [Dispatch events to bound functions](#dispatch-events-to-bound-functi
           }
       }
 
-      let http = worker.register_trigger_type(
+      worker.register_trigger_type(
           RegisterTriggerType::new(
               "mini-http",
               "Routes HTTP requests to bound functions",
@@ -254,23 +242,81 @@ covered in [Dispatch events to bound functions](#dispatch-events-to-bound-functi
   </Tabs>
 </Accordion>
 
-For typed `config` and call-payload schemas, attach Pydantic, Zod, or `schemars::JsonSchema` types
-to the registration in your language of choice. See each SDK's reference for the exact builder.
+### Attach schemas to the trigger type
+
+A trigger type can carry two optional JSON Schemas that describe its payloads:
+
+- **`trigger_request_format`**: The schema for the per-binding `config` consumers pass to
+  `worker.registerTrigger(...)` when they bind a function to your trigger type.
+- **`call_request_format`**: The schema for the payload your worker delivers to bound functions when
+  the trigger fires.
+
+Both feed the iii console, the agent-readable skills, and the
+[`engine::trigger-types::list`](/using-iii/functions#engine-built-ins-engine) output so consumers
+know what to send and what they'll receive. Like
+[function request / response schemas](/creating-workers/functions#attach-request-and-response-schemas),
+they are **metadata only today** — the engine does not reject payloads or callbacks that don't match
+them.
+
+Each SDK accepts these in its own idiomatic way:
+
+| SDK                                                                                                             | What you pass                                                                                                                                  |
+| --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Node](/sdk-reference/node-sdk#registertriggertype) / [Browser](/sdk-reference/browser-sdk#registertriggertype) | Raw JSON Schema objects on `trigger_request_format` / `call_request_format`. Convert Zod 4+ schemas with `z.toJSONSchema(...)`.                |
+| [Python](/sdk-reference/python-sdk#register_trigger_type)                                                       | A Pydantic model class (auto-converted) or a raw dict on the same fields of `RegisterTriggerTypeInput`.                                        |
+| [Rust](/sdk-reference/rust-sdk#register_trigger_type)                                                           | Builder methods on `RegisterTriggerType`: `.trigger_request_format::<T>()` and `.call_request_format::<T>()`, where `T: schemars::JsonSchema`. |
+
+The on-the-wire shape both produce is documented in
+[Engine protocol / `RegisterTriggerType`](/sdk-reference/engine-sdk#registertriggertype).
 
 {/* TODO: Review against real SDK/CLI surface (now, and post-sdk rework, separately) */}
 
-### Unregister
+### Unregister a Trigger Type
 
 Tear down a trigger type at runtime when the work it routes is no longer needed. When the worker
 disconnects, all trigger types it advertised are removed automatically and the engine stops routing
 events that depended on them, so this step is only necessary if you want to drop a type while the
 worker stays connected.
 
+Call it any time after `registerTriggerType` while the worker stays connected — e.g. the underlying
+resource went into maintenance mode, a feature flag turned the surface off, or you want to rotate
+the type to a new schema without restarting. Continuing the `mini-http` example, here the worker
+drops `mini-http` because its HTTP listener was disabled by config:
+
 <Tabs>
-  <Tab title="Node / TypeScript">```typescript http.unregister(); ```</Tab>
-  <Tab title="Python">```python http.unregister() ```</Tab>
-  <Tab title="Rust">```rust worker.unregister_trigger_type("mini-http"); ```</Tab>
+  <Tab title="Node / TypeScript">
+    ```typescript
+    // e.g. config reload disabled the HTTP listener; stop accepting new bindings
+    // while the worker keeps serving other trigger types.
+    worker.unregisterTriggerType({
+      id: "mini-http",
+      description: "Routes HTTP requests to bound functions",
+    });
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    # e.g. config reload disabled the HTTP listener; stop accepting new bindings
+    # while the worker keeps serving other trigger types.
+    worker.unregister_trigger_type(
+        {"id": "mini-http", "description": "Routes HTTP requests to bound functions"}
+    )
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    // e.g. config reload disabled the HTTP listener; stop accepting new bindings
+    // while the worker keeps serving other trigger types.
+    worker.unregister_trigger_type("mini-http");
+    ```
+  </Tab>
 </Tabs>
+
+<Note>
+  Node and Python `registerTriggerType` also return a handle with an `.unregister()` shortcut. Rust
+  takes only the `id` string; Node and Python take the full input object but only the `id` field is
+  used to identify the type being torn down.
+</Note>
 
 ## Dispatch events to bound functions
 
@@ -330,11 +376,3 @@ Continuing the `mini-http` example from above:
 On each dispatched event, the engine evaluates the consumer's `config` and optional
 `condition_function_id`, then routes matching invocations to the bound function and returns the
 result to the caller.
-
-## What goes in Worker Docs
-
-The trigger type _id_, the shape of the `config` consumers pass when binding, the call-payload shape
-your worker delivers to bound functions, the event ordering guarantees, and any back-pressure or
-retry semantics belong in this worker's Worker Docs so consumers know what to pass when they call
-`registerTrigger`. Keep iii-level concepts (the trigger binding model itself, condition gates) here;
-document the per-type specifics there.
