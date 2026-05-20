@@ -16,6 +16,8 @@ fires.
 This page is about authoring new trigger types from inside your worker. For invoking functions and
 binding triggers to functions from the consumer side, see [Using iii / Triggers](/using-iii/triggers).
 
+{/* TODO: Review against real SDK/CLI surface (now, and post-sdk rework, separately) */}
+
 ## Declare a trigger type
 
 Inside the worker, register the trigger type once during startup. You pass an `id` and
@@ -118,6 +120,8 @@ trigger type, or to tear the type down.
 
 For typed `config` and call-payload schemas, attach Pydantic, Zod, or `schemars::JsonSchema` types
 to the registration in your language of choice. See each SDK's reference for the exact builder.
+
+{/* TODO: Review against real SDK/CLI surface (now, and post-sdk rework, separately) */}
 
 ## Dispatch events to bound functions
 

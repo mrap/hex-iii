@@ -8,23 +8,29 @@ type: "how-to"
 ## How workers expand iii
 
 Workers add capability to an iii system. Each one contributes functions and triggers the engine can
-route to. This page covers deploying and wiring workers into a project. For the authoring surface a
-worker uses to register its functions and triggers (the SDK), see each language's Worker Docs
-authoring guide.
+route to. This page covers deploying and wiring workers into a project.
+
+<Note>
+  For the full SDK surface each Worker can use when interacting with iii, see the complete SDK
+  reference by language: [Node](/sdk-reference/node-sdk), [Python](/sdk-reference/python-sdk),
+  [Rust](/sdk-reference/rust-sdk), or [Browser](/sdk-reference/browser-sdk).
+</Note>
 
 ## Connecting to the engine
 
-A worker connects to the engine over WebSocket. Set the engine URL via the `III_URL` environment
-variable, or pass it explicitly to `register_worker`. The connection string is the only coupling
-between a worker and the iii instance it joins, so the worker process can be deployed anywhere
-reachable on the network.
+A worker connects to the engine over WebSocket. The convention is to set the engine URL via the
+`III_URL` environment variable, but it can also be passed explicitly to `register_worker`. The
+connection string is the only coupling between a worker and the iii instance it joins, so the worker
+process can be deployed anywhere reachable on the network.
 
 <Tabs>
   <Tab title="Node / TypeScript">
     ```typescript
     import { registerWorker } from "iii-sdk";
 
-    const worker = registerWorker(process.env.III_URL);
+    const worker = registerWorker(process.env.III_URL, {
+      workerName: "my-worker",
+    });
     ```
 
   </Tab>
@@ -42,16 +48,27 @@ reachable on the network.
   </Tab>
   <Tab title="Rust">
     ```rust
-    use iii_sdk::{InitOptions, register_worker};
+    use iii_sdk::{InitOptions, WorkerMetadata, register_worker};
 
     let url = std::env::var("III_URL").expect("III_URL must be set");
-    let worker = register_worker(&url, InitOptions::default());
+    let worker = register_worker(
+        &url,
+        InitOptions {
+            metadata: Some(WorkerMetadata {
+                name: "my-worker".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
     ```
 
   </Tab>
 </Tabs>
 
-## Worker lifecycle states
+## Worker lifecycle
+
+### States
 
 Workers transition through a small set of states after connecting:
 `connecting → connected → available / busy → disconnected`. `connecting` is the WebSocket handshake.
@@ -60,44 +77,225 @@ whether the Worker is currently handling invocations. `disconnected` is the term
 WebSocket closes. The Engine tracks these transitions and surfaces them to other Workers and tooling
 through its discovery functions, so the rest of the system can react.
 
-## Handling Worker disconnects
+### Inspecting the live registry
+
+To see what's currently connected to the Engine, invoke one of the `engine::*::list` Functions to
+get the current state of the registry. Each returns a list:
+
+| Function                      | What it returns                                                 |
+| ----------------------------- | --------------------------------------------------------------- |
+| `engine::workers::list`       | Every connected Worker with metrics.                            |
+| `engine::functions::list`     | Every registered Function. Filterable by `include_internal`.    |
+| `engine::triggers::list`      | Every registered Trigger. Filterable by `include_internal`.     |
+| `engine::trigger-types::list` | Every advertised Trigger type with its config and call schemas. |
+
+### Handling Worker disconnects
 
 When a Worker's WebSocket closes, the Engine cleans up after it automatically. Its Functions and
 Triggers leave the live registry, and any in-flight invocations of those Functions are cancelled.
-There are two things to handle on the caller side:
 
-1. **Catch `invocation_stopped`.** Callers waiting on a Function whose Worker disconnects mid-flight
-   receive an `invocation_stopped` error rather than a timeout. Treat it like a cancellation, not a
-   transient failure. Retrying will fail until a Worker reconnects and re-registers the Function.
-1. **Subscribe to the discovery events** if you need to react to topology changes:
-   - `engine::workers-available` fires immediately when a Worker connects or disconnects.
-   - `engine::functions-available` is eventually consistent; it fires on the next polling tick once
-     the function-list hash changes.
+#### In flight requests
 
-## Inspecting the live registry
+In flight requests will get a `invocation_stopped` error, catch these errors and treat them like a
+cancellation. Retrying will fail until the Worker that owns this function reconnects.
 
-To see what's currently connected to the Engine, use one of two surfaces depending on whether you
-want a snapshot or a live subscription:
+{/* TODO: Revisit and check code sample after SDK surface is reworked */}
 
-- **Read a snapshot** by invoking one of the `engine::*::list` Functions:
-  - `engine::workers::list`: every connected Worker with metrics.
-  - `engine::functions::list`: every registered Function (filterable by `include_internal`).
-  - `engine::triggers::list`: every registered Trigger (filterable by `include_internal`).
-  - `engine::trigger-types::list`: every advertised Trigger type with its config and call schemas.
-- **Subscribe to changes** by registering a Trigger against `engine::workers-available` (fires when
-  a Worker connects or disconnects) or `engine::functions-available` (fires when a Function is
-  registered or unregistered). See [Handling Worker disconnects](#handling-worker-disconnects) for
-  their consistency semantics.
+<Expandable title="Example: catch `invocation_stopped`">
+  <Tabs>
+    <Tab title="Node / TypeScript">
+      ```typescript
+      import { IIIInvocationError } from "iii-sdk";
 
-<Note>
-  These are the high-level call surfaces. For the wire-level shapes, see [Engine
-  protocol](/sdk-reference/engine-sdk#engine-discovery-functions).
-</Note>
+      try {
+        const result = await iii.trigger({
+          function_id: "math::add",
+          payload: { a: 1, b: 2 },
+        });
+      } catch (err) {
+        if (err instanceof IIIInvocationError && err.code === "invocation_stopped") {
+          // Worker disconnected mid-invocation. Subscribe to `engine::functions-available`
+          // (see "Subscribe to changes" below) to know when to retry.
+          return;
+        }
+        throw err;
+      }
+      ```
+    </Tab>
+    <Tab title="Python">
+      ```python
+      from iii import IIIInvocationError
+
+      try:
+          result = iii.trigger({
+              "function_id": "math::add",
+              "payload": {"a": 1, "b": 2},
+          })
+      except IIIInvocationError as err:
+          if err.code == "invocation_stopped":
+              # Worker disconnected mid-invocation. Subscribe to `engine::functions-available`
+              # (see "Subscribe to changes" below) to know when to retry.
+              return
+          raise
+      ```
+    </Tab>
+    <Tab title="Rust">
+      ```rust
+      use iii_sdk::{IIIError, TriggerRequest};
+      use serde_json::json;
+
+      let result = iii
+          .trigger(TriggerRequest {
+              function_id: "math::add".into(),
+              payload: json!({ "a": 1, "b": 2 }),
+              action: None,
+              timeout_ms: None,
+          })
+          .await;
+
+      match result {
+          Err(IIIError::Remote { code, .. }) if code == "invocation_stopped" => {
+              // Worker disconnected mid-invocation. Subscribe to `engine::functions-available`
+              // (see "Subscribe to changes" below) to know when to retry.
+          }
+          Err(e) => return Err(e.into()),
+          Ok(value) => { /* use value */ }
+      }
+      ```
+    </Tab>
+  </Tabs>
+</Expandable>
+
+#### Subscribe to changes
+
+{/* TODO: Link out to SDK reference once SDK surface is stable */}
+
+You can register a Trigger against one of the engine's discovery events to react to topology changes
+as they happen. This is particularly useful for continuing work when a Worker comes back online.
+
+| Trigger                       | When it fires                             |
+| ----------------------------- | ----------------------------------------- |
+| `engine::workers-available`   | A Worker connects or disconnects.         |
+| `engine::functions-available` | A Function is registered or unregistered. |
+
+<Expandable title="Example: subscribe to discovery events">
+  <Tabs>
+    <Tab title="Node / TypeScript">
+      ```typescript
+      iii.registerFunction(
+        "discovery::on-workers",
+        async (data: { event: string; worker_id: string }) => {
+          if (data.event === "worker_connected") {
+            // A Worker just joined the registry; its Functions are callable now.
+          }
+        },
+      );
+      iii.registerTrigger({
+        type: "engine::workers-available",
+        function_id: "discovery::on-workers",
+        config: {},
+      });
+
+      iii.registerFunction(
+        "discovery::on-functions",
+        async (data: { event: string; functions: { function_id: string }[] }) => {
+          // `functions` is the full snapshot after the change.
+          const ids = data.functions.map((f) => f.function_id);
+        },
+      );
+      iii.registerTrigger({
+        type: "engine::functions-available",
+        function_id: "discovery::on-functions",
+        config: {},
+      });
+      ```
+    </Tab>
+    <Tab title="Python">
+      ```python
+      async def on_workers(data: dict) -> None:
+          if data["event"] == "worker_connected":
+              # A Worker just joined the registry; its Functions are callable now.
+              pass
+
+      iii.register_function("discovery::on-workers", on_workers)
+      iii.register_trigger({
+          "type": "engine::workers-available",
+          "function_id": "discovery::on-workers",
+          "config": {},
+      })
+
+      async def on_functions(data: dict) -> None:
+          # `functions` is the full snapshot after the change.
+          ids = [f["function_id"] for f in data.get("functions", [])]
+
+      iii.register_function("discovery::on-functions", on_functions)
+      iii.register_trigger({
+          "type": "engine::functions-available",
+          "function_id": "discovery::on-functions",
+          "config": {},
+      })
+      ```
+    </Tab>
+    <Tab title="Rust">
+      ```rust
+      use iii_sdk::{RegisterFunction, RegisterTriggerInput};
+      use schemars::JsonSchema;
+      use serde::Deserialize;
+      use serde_json::{Value, json};
+
+      #[derive(Deserialize, JsonSchema)]
+      struct WorkersAvailable { event: String, worker_id: String }
+
+      #[derive(Deserialize, JsonSchema)]
+      struct FunctionsAvailable { event: String, functions: Vec<Value> }
+
+      iii.register_function(RegisterFunction::new_async(
+          "discovery::on-workers",
+          |input: WorkersAvailable| async move {
+              if input.event == "worker_connected" {
+                  // A Worker just joined the registry; its Functions are callable now.
+              }
+              Ok::<_, String>(())
+          },
+      ));
+      iii.register_trigger(RegisterTriggerInput {
+          trigger_type: "engine::workers-available".into(),
+          function_id: "discovery::on-workers".into(),
+          config: json!({}),
+          metadata: None,
+      })?;
+
+      iii.register_function(RegisterFunction::new_async(
+          "discovery::on-functions",
+          |input: FunctionsAvailable| async move {
+              // `functions` is the full snapshot after the change.
+              let _count = input.functions.len();
+              Ok::<_, String>(())
+          },
+      ));
+      iii.register_trigger(RegisterTriggerInput {
+          trigger_type: "engine::functions-available".into(),
+          function_id: "discovery::on-functions".into(),
+          config: json!({}),
+          metadata: None,
+      })?;
+      ```
+    </Tab>
+  </Tabs>
+</Expandable>
 
 ## Worker manifest
 
-When a worker is checked into a project so iii can launch it locally, `iii.worker.yaml` at the
-worker's root tells iii how to install dependencies, run the worker, and pass through configuration.
+`iii.worker.yaml` is the manifest at the worker's root that tells iii how to install dependencies,
+run the worker, and pass through configuration. This applies to both the iii worker CLI commands
+(e.g. [`start`, `stop`, `restart`](/using-iii/workers#starting-and-stopping-workers)) and to workers
+that iii starts automatically when they're specified in iii's
+[`config.yaml`](/using-iii/engine#configuration-file-structure).
+
+<Note>
+  If a worker isn't starting correctly then make sure to check its manifest and [`iii worker
+  logs`](/using-iii/workers#inspecting-a-worker).
+</Note>
 
 ```yaml
 name: math-worker
@@ -110,11 +308,11 @@ scripts:
   start: "python math_worker.py"
 ```
 
-The manifest is metadata about _starting_ the Worker. Once the Worker is running, the WebSocket
-connection to the Engine and the function registrations are what matter. A Worker started by
-`iii worker add` and a Worker started by hand in a container behave identically to the Engine.
+The manifest is metadata about _starting_ the Worker. Once the Worker is running iii treats them all
+the same. A Worker started by `iii` via its `config.yaml`, via `iii worker start`, or a manually run
+process that uses the iii SDK all behave identically with the Engine.
 
-For the full manifest field schema, see [Using iii / Workers](/using-iii/workers).
+{/* TODO: link to the canonical iii.worker.yaml reference page once it exists. */}
 
 ## What a worker contributes
 
@@ -137,3 +335,5 @@ worker's registrations on disconnect.
 Set `III_URL` to point the worker at the remote engine (see
 [Connecting to the engine](#connecting-to-the-engine)), register the work the job needs to expose,
 and let the process exit when the job is done.
+
+{/* TODO: confirm the SDK shutdown call (e.g. `worker.shutdown()`) and add a minimal Node / TypeScript, Python, Rust example that registers a function, awaits a single invocation, and exits cleanly. */}
