@@ -1,6 +1,6 @@
 ---
 title: "Workers"
-description: "Deploying and integrating workers into an iii project."
+description: "Deploying and integrating workers into a iii project."
 owner: "devrel"
 type: "how-to"
 ---
@@ -9,6 +9,13 @@ type: "how-to"
 
 Workers add capability to an iii system. Each one contributes functions and triggers the engine can
 route to. This page covers deploying and wiring workers into a project.
+
+Once connected, a worker exposes:
+
+- Functions, callable by `function_id` from anywhere in the system (see
+  [Using iii / Functions](/using-iii/functions)).
+- Triggers it advertises, which other workers can bind their functions to (see
+  [Using iii / Triggers](/using-iii/triggers)).
 
 <Note>
   For the full SDK surface each Worker can use when interacting with iii, see the complete SDK
@@ -89,6 +96,112 @@ get the current state of the registry. Each returns a list:
 | `engine::triggers::list`      | Every registered Trigger. Filterable by `include_internal`.     |
 | `engine::trigger-types::list` | Every advertised Trigger type with its config and call schemas. |
 
+<Accordion title="Example: list registry contents">
+  <Tabs>
+    <Tab title="Node / TypeScript">
+      ```typescript
+      // engine::workers::list — pass { worker_id: "<uuid>" } to look up one worker
+      const { workers } = await iii.trigger({
+        function_id: "engine::workers::list",
+        payload: {},
+      });
+
+      // engine::functions::list
+      const { functions } = await iii.trigger({
+        function_id: "engine::functions::list",
+        payload: { include_internal: false },
+      });
+
+      // engine::triggers::list
+      const { triggers } = await iii.trigger({
+        function_id: "engine::triggers::list",
+        payload: { include_internal: false },
+      });
+
+      // engine::trigger-types::list
+      const { trigger_types } = await iii.trigger({
+        function_id: "engine::trigger-types::list",
+        payload: { include_internal: false },
+      });
+      ```
+    </Tab>
+    <Tab title="Python">
+      ```python
+      # engine::workers::list — pass {"worker_id": "<uuid>"} to look up one worker
+      workers = iii.trigger({
+          "function_id": "engine::workers::list",
+          "payload": {},
+      })["workers"]
+
+      # engine::functions::list
+      functions = iii.trigger({
+          "function_id": "engine::functions::list",
+          "payload": {"include_internal": False},
+      })["functions"]
+
+      # engine::triggers::list
+      triggers = iii.trigger({
+          "function_id": "engine::triggers::list",
+          "payload": {"include_internal": False},
+      })["triggers"]
+
+      # engine::trigger-types::list
+      trigger_types = iii.trigger({
+          "function_id": "engine::trigger-types::list",
+          "payload": {"include_internal": False},
+      })["trigger_types"]
+      ```
+    </Tab>
+    <Tab title="Rust">
+      ```rust
+      use iii_sdk::TriggerRequest;
+      use serde_json::json;
+
+      // engine::workers::list — pass json!({ "worker_id": "<uuid>" }) to look up one worker
+      let workers = iii
+          .trigger(TriggerRequest {
+              function_id: "engine::workers::list".into(),
+              payload: json!({}),
+              action: None,
+              timeout_ms: None,
+          })
+          .await?;
+
+      // engine::functions::list
+      let functions = iii
+          .trigger(TriggerRequest {
+              function_id: "engine::functions::list".into(),
+              payload: json!({ "include_internal": false }),
+              action: None,
+              timeout_ms: None,
+          })
+          .await?;
+
+      // engine::triggers::list
+      let triggers = iii
+          .trigger(TriggerRequest {
+              function_id: "engine::triggers::list".into(),
+              payload: json!({ "include_internal": false }),
+              action: None,
+              timeout_ms: None,
+          })
+          .await?;
+
+      // engine::trigger-types::list
+      let trigger_types = iii
+          .trigger(TriggerRequest {
+              function_id: "engine::trigger-types::list".into(),
+              payload: json!({ "include_internal": false }),
+              action: None,
+              timeout_ms: None,
+          })
+          .await?;
+      ```
+    </Tab>
+
+  </Tabs>
+</Accordion>
+
 ### Handling Worker disconnects
 
 When a Worker's WebSocket closes, the Engine cleans up after it automatically. Its Functions and
@@ -101,7 +214,7 @@ cancellation. Retrying will fail until the Worker that owns this function reconn
 
 {/* TODO: Revisit and check code sample after SDK surface is reworked */}
 
-<Expandable title="Example: catch `invocation_stopped`">
+<Accordion title="Example: catch `invocation_stopped`">
   <Tabs>
     <Tab title="Node / TypeScript">
       ```typescript
@@ -163,8 +276,9 @@ cancellation. Retrying will fail until the Worker that owns this function reconn
       }
       ```
     </Tab>
+
   </Tabs>
-</Expandable>
+</Accordion>
 
 #### Subscribe to changes
 
@@ -178,7 +292,7 @@ as they happen. This is particularly useful for continuing work when a Worker co
 | `engine::workers-available`   | A Worker connects or disconnects.         |
 | `engine::functions-available` | A Function is registered or unregistered. |
 
-<Expandable title="Example: subscribe to discovery events">
+<Accordion title="Example: subscribe to discovery events">
   <Tabs>
     <Tab title="Node / TypeScript">
       ```typescript
@@ -281,8 +395,9 @@ as they happen. This is particularly useful for continuing work when a Worker co
       })?;
       ```
     </Tab>
+
   </Tabs>
-</Expandable>
+</Accordion>
 
 ## Worker manifest
 
@@ -291,11 +406,6 @@ run the worker, and pass through configuration. This applies to both the iii wor
 (e.g. [`start`, `stop`, `restart`](/using-iii/workers#starting-and-stopping-workers)) and to workers
 that iii starts automatically when they're specified in iii's
 [`config.yaml`](/using-iii/engine#configuration-file-structure).
-
-<Note>
-  If a worker isn't starting correctly then make sure to check its manifest and [`iii worker
-  logs`](/using-iii/workers#inspecting-a-worker).
-</Note>
 
 ```yaml
 name: math-worker
@@ -312,28 +422,56 @@ The manifest is metadata about _starting_ the Worker. Once the Worker is running
 the same. A Worker started by `iii` via its `config.yaml`, via `iii worker start`, or a manually run
 process that uses the iii SDK all behave identically with the Engine.
 
+<Note>
+  If a worker isn't starting correctly then make sure to check its manifest and [`iii worker
+  logs`](/using-iii/workers#inspecting-a-worker).
+</Note>
+
 {/* TODO: link to the canonical iii.worker.yaml reference page once it exists. */}
 
-## What a worker contributes
+## Shutting down a worker
 
-Once connected, a worker exposes:
+Call the SDK's `shutdown` to close the WebSocket cleanly. The engine removes the worker's Functions
+and Triggers from the registry, fires `engine::workers-available` with `worker_disconnected`, and
+cancels in-flight invocations targeting them with `invocation_stopped`.
 
-- Functions, callable by `function_id` from anywhere in the system (see
-  [Using iii / Functions](/using-iii/functions)).
-- Triggers it advertises, which other workers can bind their functions to (see
-  [Using iii / Triggers](/using-iii/triggers)).
+Without `shutdown`, an abrupt process exit reaches the same state once the engine notices the
+dropped socket; graceful shutdown makes it deterministic and faster.
 
-The SDK calls a worker uses to register these are language-specific and documented in each
-language's Worker Docs authoring guide.
+<Tabs>
+  <Tab title="Node / TypeScript">
+    ```typescript
+    process.on("SIGTERM", async () => {
+      await iii.shutdown();
+      process.exit(0);
+    });
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import signal
 
-## Run an ephemeral worker
+    def _on_term(*_):
+        iii.shutdown()
+        raise SystemExit(0)
 
-For one-shot jobs (Kubernetes Jobs, serverless containers, scheduled scripts), an SDK worker can
-connect to a remote engine, register its functions, do the work, and exit. The engine cleans up the
-worker's registrations on disconnect.
+    signal.signal(signal.SIGTERM, _on_term)
+    ```
 
-Set `III_URL` to point the worker at the remote engine (see
-[Connecting to the engine](#connecting-to-the-engine)), register the work the job needs to expose,
-and let the process exit when the job is done.
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    // Rust threads do not keep the process alive on their own; await this
+    // before `main` returns so the connection thread exits cleanly.
+    iii.shutdown_async().await;
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  Shutdown is very useful for **One-shot / ephemeral workers**. Kubernetes Jobs, serverless
+  containers, or scheduled scripts can connect just like any other Worker, do their work, and
+  `shutdown()`.
+</Note>
 
 {/* TODO: confirm the SDK shutdown call (e.g. `worker.shutdown()`) and add a minimal Node / TypeScript, Python, Rust example that registers a function, awaits a single invocation, and exits cleanly. */}
