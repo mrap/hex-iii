@@ -88,53 +88,45 @@ The `config` shape is defined per trigger type and documented in each publishing
   variants (`Void`, `Enqueue`, etc.).
 </Note>
 
-## Declare a trigger type
+## Declaring a Trigger Type
 
-So far you've been the _consumer_: your worker's functions get bound to trigger types other workers
-publish. This section flips the roles. Your worker is now the _publisher_, and you want functions
-that other workers register to fire on events your worker observes (an HTTP request, a webhook hit,
-a file change, a database update).
+So far this documentation has focused on being the _consumer_: your worker's functions get bound to
+trigger types other workers publish. This section flips the roles. Your worker is now the
+_publisher_, and you want functions that other workers register to fire on events your worker
+observes (an HTTP request, a webhook hit, a file change, a database update).
+
+### Components of a Trigger Type
 
 A trigger type is two things bundled together:
 
-1. A string `id` that consumers reference when they bind (`type: "mini-http"`).
+1. A string `id` that consumers reference when they bind to a trigger (ex. `type: "mini-http"`).
 2. A per-binding routing table that **your worker** maintains in-process. The engine doesn't store
-   the bindings for you — it forwards every bind/unbind from any consumer worker on the network to
-   your publisher worker as a callback, and you decide what to do with each one.
+   bindings. The engine forwards every bind/unbind from any consumer worker on the network to the
+   publisher worker as a callback, and this worker decides what to do with each one.
 
 You declare the trigger type once at startup with
-`worker.registerTriggerType({ id, description }, handler)`. The handler exposes two callbacks:
+`worker.registerTriggerType({ id, description }, handler)`.
 
-- `registerTrigger(config)` — fires when any consumer worker binds a function to your trigger type.
+The `TriggerHandler` interface **you implement** exposes two callbacks. The engine invokes them on
+your publisher worker whenever a consumer binds or unbinds:
+
+- `registerTrigger(config)`: Runs when any consumer worker binds a function to your trigger type.
   The `config` carries the trigger instance's `id`, the consumer's `function_id`, and the
   consumer-supplied `config` matching the shape your type accepts. Stash it.
-- `unregisterTrigger(config)` — fires on unbind. Drop it from your table.
+- `unregisterTrigger(config)`: Runs on unbind. Drop it from your table.
 
-<Warning>
-  **Name collision, read carefully.** The handler's `registerTrigger` callback shares a name with
-  `worker.registerTrigger` (the consumer-side bind call from the previous section) but does the
-  opposite job. `worker.registerTrigger(...)` is how a consumer _binds_ a function. The handler's
-  `registerTrigger(config)` is how the engine _notifies your publisher_ that a bind happened so you
-  can update your routing table. Same name, opposite sides of the wire.
-</Warning>
+The `TriggerTypeRef` handle that **`registerTriggerType` returns to you** has a convenience method
+for unregistering the trigger at any time during runtime:
 
-`registerTriggerType` returns a `TriggerTypeRef` handle. It has three uses:
-
-- `handle.registerFunction(id, fn, config)` (Node and Python only) — register a function your worker
-  owns and bind it to this trigger type in one call. Useful when the publisher worker also wants its
-  own functions to fire.
-- `handle.registerTrigger(function_id, config)` (Node and Python only) — bind any function to this
-  trigger type without repeating `type:`.
-- `handle.unregister()` (Node and Python only) — tear the trigger type down at runtime. In Rust,
-  call `worker.unregister_trigger_type(id)` instead.
+- `worker.unregister_trigger_type(id)`: Remove the trigger type during runtime.
 
 ### Example: a mini `iii-http` from scratch
 
-The example below sketches a tiny version of [iii-http](https://workers.iii.dev/workers/iii-http) —
+The example below sketches a tiny version of [iii-http](https://workers.iii.dev/workers/iii-http),
 the worker that publishes the real built-in `http` trigger type. The publisher worker (1) declares
 an HTTP-shaped trigger type called `mini-http`, (2) maintains a `bindings` map of
 `{ trigger id → function_id, method+path }` as consumers bind/unbind, and (3) is then ready to look
-up the right binding when an HTTP request lands. Step 3 — actually firing the bound function — is
+up the right binding when an HTTP request lands. Step 3 (actually firing the bound function) is
 covered in [Dispatch events to bound functions](#dispatch-events-to-bound-functions) below.
 
 <Accordion title="Example: declare a `mini-http` trigger type">
