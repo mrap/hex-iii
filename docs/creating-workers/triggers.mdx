@@ -142,9 +142,8 @@ Don't confuse trigger _metadata_ with trigger type [_schemas_](#attach-schemas-t
   It's a free-form tag bag the engine stores as-is, used for the publisher's bookkeeping and for
   discovery. For example, a consumer binding to `http` might attach
   `metadata: { team: "platform", env: "staging", on_call: "alice" }` so the publishing worker can
-  log the team, and
-  [`engine::triggers::list`](/using-iii/functions#engine-built-ins-engine) surfaces this
-  information on request.
+  log the team, and [`engine::triggers::list`](/using-iii/functions#engine-built-ins-engine)
+  surfaces this information on request.
 - **Schemas** are set by the **publisher** when declaring the trigger type. They document the JSON
   shapes the consumer interacts with. For example, the built-in `http` type declares:
   - `config` (what the consumer passes at bind time): `{ api_path, http_method }`.
@@ -165,9 +164,11 @@ observes (an HTTP request, a webhook hit, a file change, a database update).
 A trigger type is two things bundled together:
 
 1. A string `id` that consumers reference when they bind to a trigger (ex. `type: "mini-http"`).
-2. A per-binding routing table that **your worker** maintains in-process. The engine doesn't store
-   bindings. The engine forwards every bind/unbind from any consumer worker on the network to the
-   publisher worker as a callback, and this worker decides what to do with each one.
+2. A per-binding routing table that **your worker** maintains in-process. The engine's registry
+   records the binding canonically (this is what
+   [`engine::triggers::list`](/using-iii/functions#engine-built-ins-engine) returns), but the engine
+   doesn't dispatch on it. The engine forwards every bind/unbind from any consumer worker on the
+   network to the publisher worker as a callback, and this worker decides what to do with each one.
 
 You declare the trigger type once at startup with
 `worker.registerTriggerType({ id, description }, handler)`.
@@ -184,7 +185,8 @@ your publisher worker whenever a consumer binds or unbinds:
 
 The trigger type can be torn down at any point during runtime with
 `worker.unregisterTriggerType(...)` (or `worker.unregister_trigger_type(...)` in Python and Rust).
-See the [Unregister](#unregister) section below for per-language signatures.
+See the [Unregister a Trigger Type](#unregister-a-trigger-type) section below for per-language
+signatures.
 
 ### Example: A mini `iii-http` from scratch
 
@@ -378,10 +380,14 @@ drops `mini-http` because its HTTP listener was disabled by config:
   </Tab>
 </Tabs>
 
+{/* TODO: Update once this inconsistency is fixed */}
+
 <Note>
-  Node and Python `registerTriggerType` also return a handle with an `.unregister()` shortcut. Rust
-  takes only the `id` string; Node and Python take the full input object but only the `id` field is
-  used to identify the type being torn down.
+  Node's `registerTriggerType` also returns a `TriggerTypeRef` with an `.unregister()` shortcut that
+  delegates to `worker.unregisterTriggerType(...)`. Python's `TriggerTypeRef` only exposes
+  `register_trigger` and `register_function`; tear down the trigger type itself via
+  `worker.unregister_trigger_type(...)`. Rust takes only the `id` string; Node and Python take the
+  full input object but only the `id` field is used to identify the type being torn down.
 </Note>
 
 ## Dispatch events to bound functions

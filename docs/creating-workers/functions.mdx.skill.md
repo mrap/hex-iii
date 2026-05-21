@@ -78,7 +78,7 @@ the function. The schemas are stored with the function and surface in the iii co
 agent-readable skills.
 
 <Note>
-  Runtime validation is not yet supported. Attached schemas are metadata only; the engine does not,
+  Runtime validation is not yet supported. Attached schemas are metadata only; the engine does not
   enforce a specific schema, reject payloads, nor handler return values that don't match the
   schemas. Treat the schemas as contract documentation for function invocations, agents, and the
   console.

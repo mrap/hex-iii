@@ -500,7 +500,7 @@ dropped socket; graceful shutdown makes it deterministic and faster.
 <Note>
   Shutdown is very useful for **One-shot / ephemeral workers**. Kubernetes Jobs, serverless
   containers, or scheduled scripts can connect just like any other Worker, do their work, and
-  `shutdown()`.
+  `shutdown()` (`shutdown_async().await` in Rust).
 </Note>
 
 {/* TODO: confirm the SDK shutdown call (e.g. `worker.shutdown()`) and add a minimal Node / TypeScript, Python, Rust example that registers a function, awaits a single invocation, and exits cleanly. */}
