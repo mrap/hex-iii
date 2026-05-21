@@ -68,23 +68,3 @@ When the writer closes, the reader receives the stream end. When a worker discon
 connections close with it.
 
 For bidirectional communication, create two channels: one for each direction.
-
-## Channels versus triggers
-
-Use a trigger when the payload is a discrete event or command. Use a channel when the payload is a
-stream.
-
-| Need                                      | Use              |
-| ----------------------------------------- | ---------------- |
-| Invoke a handler with a small JSON object | Function trigger |
-| Serve a file download                     | Channel          |
-| Process a large upload                    | Channel          |
-| Send progress during a long task          | Channel messages |
-| Dispatch background work                  | Queue trigger    |
-
-## Related pages
-
-- [How to use channels](/creating-workers/channels)
-- [Node SDK channels](/sdk-reference/node-sdk#channels)
-- [Python SDK channels](/sdk-reference/python-sdk#channels)
-- [Rust SDK channels](/sdk-reference/rust-sdk#channels)
