@@ -161,8 +161,8 @@ iii worker sync --frozen   # CI form: verify the lockfile without mutating local
 iii worker verify          # report drift between config.yaml and iii.lock
 ```
 
-[`iii worker update`](#updating-a-worker) is the third lockfile command; it re-resolves pins to the
-latest permitted versions and writes them back to `iii.lock`.
+[`iii worker update`](#updating-a-worker) is the third lockfile-related command; it re-resolves pins
+to the latest permitted versions and writes them back to `iii.lock`.
 
 {/* TODO: Add a dedicated lockfile reference page for the per-field schema (top-level fields, LockedWorker, BinaryArtifact, ImageSource, manifest hash format). The dx-improves source includes `docs/workers/managed-worker-lockfile.mdx` which can be ported. */}
 
@@ -170,5 +170,4 @@ latest permitted versions and writes them back to `iii.lock`.
 
 Creating a new worker, registering functions and triggers in worker code, and building or publishing
 a worker image are out of scope for this page. See
-[Creating Workers / Workers](/creating-workers/workers) and
-[Creating Workers / Worker Registry](/creating-workers/workers-registry).
+[Creating Workers / Workers](/creating-workers/workers).
