@@ -327,23 +327,38 @@ async def test_exposes_generated_http_functions_as_normal_engine_worker_group() 
         assert worker["name"] == worker_name
         assert worker["runtime"] == "engine"
         assert worker["function_count"] == 1
-        assert function_id in worker["functions"]
-        assert worker.get("internal") is False
+        assert "functions" not in worker
+        assert worker.get("internal") is None
         assert "generated_worker" not in worker
         assert "generatedWorker" not in worker
         assert "virtual_worker" not in worker
         assert "virtualWorker" not in worker
-        assert "isolation" not in worker
+
+        worker_info = client.trigger(
+            {"function_id": "engine::workers::info", "payload": {"name": worker_name}}
+        )
+        assert worker_info["worker"]["id"] == worker_name
+        assert worker_info["worker"]["runtime"] == "engine"
+        assert worker_info["worker"]["function_count"] == 1
+        assert worker_info["worker"]["internal"] is False
+        worker_function_ids = [function["function_id"] for function in worker_info["functions"]]
+        assert function_id in worker_function_ids
 
         functions_result = client.trigger(
             {"function_id": "engine::functions::list", "payload": {"include_internal": True}}
         )
-        registered = next(
+        listed = next(
             (f for f in functions_result.get("functions", []) if f.get("function_id") == function_id),
             None,
         )
 
-        assert registered is not None, f"{function_id} not found in functions list"
+        assert listed is not None, f"{function_id} not found in functions list"
+        assert "metadata" not in listed
+
+        registered = client.trigger(
+            {"function_id": "engine::functions::info", "payload": {"function_id": function_id}}
+        )
+        assert registered["worker_name"] == worker_name
         assert registered["metadata"]["spec"]["sourceType"] == "mcp"
         assert registered["metadata"]["spec"]["workerName"] == worker_name
         assert "iii" not in registered["metadata"]
