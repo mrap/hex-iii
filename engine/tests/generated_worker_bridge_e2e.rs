@@ -188,13 +188,43 @@ async fn generated_bridge_registers_triggerable_function_and_normal_worker_group
         Some(&json!("generated-docs-worker"))
     );
     assert_eq!(generated_worker.get("runtime"), Some(&json!("engine")));
-    assert_eq!(generated_worker.get("internal"), Some(&json!(false)));
     assert_eq!(generated_worker.get("function_count"), Some(&json!(1)));
+    assert!(generated_worker.get("internal").is_none());
+    assert!(generated_worker.get("functions").is_none());
     assert!(generated_worker.get("generated_worker").is_none());
     assert!(generated_worker.get("generatedWorker").is_none());
     assert!(generated_worker.get("virtual_worker").is_none());
     assert!(generated_worker.get("virtualWorker").is_none());
-    assert!(generated_worker.get("isolation").is_none());
+
+    let worker_info = engine
+        .call(
+            "engine::workers::info",
+            json!({
+                "name": "generated-docs-worker"
+            }),
+        )
+        .await
+        .expect("workers info succeeds")
+        .expect("workers info result");
+    let worker_detail = worker_info.get("worker").expect("worker detail is present");
+    assert_eq!(
+        worker_detail.get("id"),
+        Some(&json!("generated-docs-worker"))
+    );
+    assert_eq!(worker_detail.get("runtime"), Some(&json!("engine")));
+    assert_eq!(worker_detail.get("internal"), Some(&json!(false)));
+    assert_eq!(worker_detail.get("function_count"), Some(&json!(1)));
+    assert!(
+        worker_info
+            .get("functions")
+            .and_then(Value::as_array)
+            .expect("worker functions")
+            .iter()
+            .any(
+                |function| function.get("function_id").and_then(Value::as_str)
+                    == Some("generated_docs::search")
+            )
+    );
 
     let function_list = engine
         .call(
@@ -212,6 +242,22 @@ async fn generated_bridge_registers_triggerable_function_and_normal_worker_group
             function.get("function_id").and_then(Value::as_str) == Some("generated_docs::search")
         })
         .expect("generated function is listed");
+    assert!(generated_function.get("metadata").is_none());
+
+    let generated_function = engine
+        .call(
+            "engine::functions::info",
+            json!({
+                "function_id": "generated_docs::search"
+            }),
+        )
+        .await
+        .expect("functions info succeeds")
+        .expect("functions info result");
+    assert_eq!(
+        generated_function.get("worker_name"),
+        Some(&json!("generated-docs-worker"))
+    );
     let metadata = generated_function
         .get("metadata")
         .expect("metadata is present");

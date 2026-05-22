@@ -7,14 +7,48 @@ mod common;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use iii_sdk::{
-    FunctionInfo, HttpInvocationConfig, HttpMethod, RegisterFunctionMessage, RegisterTriggerInput,
-    TriggerRequest, WorkerInfo,
+    HttpInvocationConfig, HttpMethod, RegisterFunctionMessage, RegisterTriggerInput, TriggerRequest,
 };
+
+#[derive(Debug, Deserialize)]
+struct FnRow {
+    function_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FunctionDetailRow {
+    worker_name: String,
+    metadata: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerSummaryRow {
+    id: String,
+    name: Option<String>,
+    runtime: Option<String>,
+    function_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerDetailEnvelope {
+    id: String,
+    name: Option<String>,
+    runtime: Option<String>,
+    function_count: usize,
+    internal: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerInfoOutput {
+    worker: WorkerDetailEnvelope,
+    functions: Vec<FnRow>,
+}
 
 fn unique_function_id(prefix: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -204,46 +238,58 @@ async fn exposes_generated_http_functions_as_normal_engine_worker_group() {
         .iter()
         .find(|worker| worker.get("id").and_then(Value::as_str) == Some(worker_name.as_str()))
         .expect("generated worker group not found");
-    let worker: WorkerInfo =
+    let worker: WorkerSummaryRow =
         serde_json::from_value(worker_value.clone()).expect("deserialize worker");
 
     assert_eq!(worker.id, worker_name);
     assert_eq!(worker.name.as_deref(), Some(worker_name.as_str()));
     assert_eq!(worker.runtime.as_deref(), Some("engine"));
     assert_eq!(worker.function_count, 1);
-    assert_eq!(worker.functions, vec![function_id.clone()]);
-    assert!(
-        !worker_value
-            .get("internal")
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
-    );
+    assert!(worker_value.get("internal").is_none());
+    assert!(worker_value.get("functions").is_none());
     assert!(worker_value.get("generated_worker").is_none());
     assert!(worker_value.get("generatedWorker").is_none());
     assert!(worker_value.get("virtual_worker").is_none());
     assert!(worker_value.get("virtualWorker").is_none());
-    assert!(worker_value.get("isolation").is_none());
 
-    let functions_result = iii
+    let worker_info_result = iii
         .trigger(TriggerRequest {
-            function_id: "engine::functions::list".to_string(),
-            payload: json!({"include_internal": true}),
+            function_id: "engine::workers::info".to_string(),
+            payload: json!({ "name": worker_name }),
             action: None,
             timeout_ms: None,
         })
         .await
-        .expect("function discovery request failed");
-    let functions: Vec<FunctionInfo> = serde_json::from_value(
-        functions_result
-            .get("functions")
-            .cloned()
-            .unwrap_or(Value::Array(vec![])),
+        .expect("worker info request failed");
+    let worker_info: WorkerInfoOutput =
+        serde_json::from_value(worker_info_result).expect("deserialize worker info");
+    assert_eq!(worker_info.worker.id, worker_name);
+    assert_eq!(
+        worker_info.worker.name.as_deref(),
+        Some(worker_name.as_str())
+    );
+    assert_eq!(worker_info.worker.runtime.as_deref(), Some("engine"));
+    assert_eq!(worker_info.worker.function_count, 1);
+    assert!(!worker_info.worker.internal);
+    assert!(
+        worker_info
+            .functions
+            .iter()
+            .any(|function| function.function_id == function_id)
+    );
+
+    let registered: FunctionDetailRow = serde_json::from_value(
+        iii.trigger(TriggerRequest {
+            function_id: "engine::functions::info".to_string(),
+            payload: json!({ "function_id": function_id }),
+            action: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect("function info request failed"),
     )
-    .expect("deserialize functions");
-    let registered = functions
-        .iter()
-        .find(|function| function.function_id == function_id)
-        .expect("generated function not found");
+    .expect("deserialize function detail");
+    assert_eq!(registered.worker_name, worker_name);
     let metadata = registered.metadata.as_ref().expect("function metadata");
 
     assert_eq!(metadata["spec"]["sourceType"], "http");
@@ -336,7 +382,7 @@ async fn registers_and_unregisters_external_http_function() {
             })
             .await
             .expect("function discovery request failed");
-        let functions: Vec<FunctionInfo> = serde_json::from_value(
+        let functions: Vec<FnRow> = serde_json::from_value(
             list_result
                 .get("functions")
                 .cloned()
@@ -360,7 +406,7 @@ async fn registers_and_unregisters_external_http_function() {
             })
             .await
             .expect("function discovery request failed");
-        let functions: Vec<FunctionInfo> = serde_json::from_value(
+        let functions: Vec<FnRow> = serde_json::from_value(
             list_result
                 .get("functions")
                 .cloned()
