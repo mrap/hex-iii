@@ -31,10 +31,12 @@ from .iii_types import (
 )
 from .triggers import Trigger, TriggerHandler
 
-# Relocated from the package root into ``iii.types`` in 0.18.0. Re-exported here
-# (``X as X`` marks the intentional public re-export for type checkers/linters).
-from .iii_constants import IIIConnectionState as IIIConnectionState  # noqa: E402 isort: skip
-from .iii_types import MessageType as MessageType  # noqa: E402 isort: skip
+# Public re-exports relocated from the package root into ``iii.types`` (0.18.0).
+# ``X as X`` marks them as intentional re-exports; ``isort: skip`` keeps them grouped.
+from .iii_constants import IIIConnectionState as IIIConnectionState  # isort: skip
+from .iii_types import AuthInput as AuthInput  # isort: skip
+from .iii_types import AuthResult as AuthResult  # isort: skip
+from .iii_types import MessageType as MessageType  # isort: skip
 
 if TYPE_CHECKING:
     from .channels import ChannelReader, ChannelWriter, WritableStream

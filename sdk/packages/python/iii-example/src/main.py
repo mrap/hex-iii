@@ -7,7 +7,8 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
-from iii import ApiRequest, ApiResponse, InitOptions, register_worker
+from iii import InitOptions, register_worker
+from iii.types import ApiRequest, ApiResponse
 
 state: Any = None
 streams: Any = None

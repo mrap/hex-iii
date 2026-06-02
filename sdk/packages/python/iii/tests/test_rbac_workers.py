@@ -6,8 +6,6 @@ import time
 import pytest
 
 from iii import (
-    AuthInput,
-    AuthResult,
     IIIForbiddenError,
     IIIInvocationError,
     InitOptions,
@@ -22,6 +20,7 @@ from iii import (
     TriggerHandler,
     register_worker,
 )
+from iii.types import AuthInput, AuthResult
 
 ENGINE_WS_URL = os.environ.get("III_URL", "ws://localhost:49199")
 EW_URL = os.environ.get("III_RBAC_WORKER_URL", "ws://localhost:49135")

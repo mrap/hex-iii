@@ -33,8 +33,6 @@ from .format_utils import extract_request_format, extract_response_format, pytho
 from .iii import TriggerAction, register_worker
 from .iii_constants import FunctionRef, InitOptions, TelemetryOptions
 from .iii_types import (
-    AuthInput,
-    AuthResult,
     EnqueueResult,
     HttpAuthConfig,
     HttpInvocationConfig,
@@ -67,11 +65,7 @@ from .stream import (
 )
 from .triggers import Trigger, TriggerConfig, TriggerHandler, TriggerTypeRef
 from .types import (
-    ApiRequest,
-    ApiResponse,
     Channel,
-    HttpRequest,
-    HttpResponse,
     IIIClient,
     InternalHttpRequest,
     RemoteFunctionHandler,
@@ -117,8 +111,6 @@ __all__ = [
     "TelemetryOptions",
     "TriggerAction",
     # RBAC types
-    "AuthInput",
-    "AuthResult",
     "MiddlewareFunctionInput",
     "OnFunctionRegistrationInput",
     "OnFunctionRegistrationResult",
@@ -148,11 +140,7 @@ __all__ = [
     "TriggerHandler",
     "TriggerTypeRef",
     # Types
-    "ApiRequest",
-    "ApiResponse",
     "Channel",
-    "HttpRequest",
-    "HttpResponse",
     "IIIClient",
     "InternalHttpRequest",
     "RemoteFunctionHandler",
