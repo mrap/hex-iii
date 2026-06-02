@@ -373,7 +373,7 @@ pub struct RemoteTriggerTypeData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApiRequest<T = Value> {
+pub struct HttpRequest<T = Value> {
     #[serde(default)]
     pub query_params: HashMap<String, String>,
     #[serde(default)]
@@ -389,11 +389,52 @@ pub struct ApiRequest<T = Value> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApiResponse<T = Value> {
+pub struct HttpResponse<T = Value> {
     pub status_code: u16,
     #[serde(default)]
     pub headers: HashMap<String, String>,
     pub body: T,
+}
+
+/// Streaming request: metadata plus a reader for the request body channel.
+pub struct StreamingRequest {
+    pub query_params: HashMap<String, String>,
+    pub path_params: HashMap<String, String>,
+    pub headers: HashMap<String, String>,
+    pub path: String,
+    pub method: String,
+    pub request_body: ChannelReader,
+}
+
+/// Streaming response handle backed by a channel writer.
+pub struct StreamingResponse {
+    writer: ChannelWriter,
+}
+
+impl StreamingResponse {
+    pub fn new(writer: ChannelWriter) -> Self {
+        Self { writer }
+    }
+
+    pub async fn status(&self, status_code: u16) -> Result<(), IIIError> {
+        self.writer
+            .send_message(&serde_json::json!({"type": "set_status", "status_code": status_code}).to_string())
+            .await
+    }
+
+    pub async fn headers(&self, headers: HashMap<String, String>) -> Result<(), IIIError> {
+        self.writer
+            .send_message(&serde_json::json!({"type": "set_headers", "headers": headers}).to_string())
+            .await
+    }
+
+    pub async fn write(&self, data: &[u8]) -> Result<(), IIIError> {
+        self.writer.write(data).await
+    }
+
+    pub async fn close(&self) -> Result<(), IIIError> {
+        self.writer.close().await
+    }
 }
 
 /// A streaming channel pair for worker-to-worker data transfer.
@@ -409,15 +450,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn api_request_defaults_when_missing_fields() {
-        let request: ApiRequest = serde_json::from_str("{}").unwrap();
-
+    fn http_request_defaults_when_missing_fields() {
+        let request: HttpRequest = serde_json::from_str("{}").unwrap();
         assert!(request.query_params.is_empty());
         assert!(request.path_params.is_empty());
         assert!(request.headers.is_empty());
         assert_eq!(request.path, "");
         assert_eq!(request.method, "");
         assert!(request.body.is_null());
+    }
+
+    #[test]
+    fn http_response_roundtrips() {
+        let resp: HttpResponse = serde_json::from_str(
+            r#"{"status_code":201,"headers":{"x":"y"},"body":{"ok":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(resp.status_code, 201);
+        assert_eq!(resp.headers.get("x"), Some(&"y".to_string()));
     }
 
     #[test]
