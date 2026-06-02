@@ -33,21 +33,20 @@ export { Logger } from '@iii-dev/observability'
 export type { TriggerConfig, TriggerHandler } from './triggers'
 
 export type {
-  ApiRequest,
-  ApiResponse,
   Channel,
   FunctionRef,
   HttpRequest,
   HttpResponse,
-  InternalHttpRequest,
   ISdk,
   RegisterFunctionInput,
   RegisterFunctionOptions,
   RegisterTriggerInput,
   RegisterTriggerTypeInput,
   RemoteFunctionHandler,
+  StreamingRequest,
+  StreamingResponse,
   Trigger,
   TriggerTypeRef,
 } from './types'
 
-export { http } from './utils'
+export { http, httpStream } from './utils'
