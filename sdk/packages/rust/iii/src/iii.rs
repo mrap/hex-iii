@@ -19,7 +19,7 @@ impl<T> MutexExt<T> for Mutex<T> {
     }
 }
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt, future::BoxFuture};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
@@ -40,7 +40,10 @@ use crate::{
         UnregisterTriggerMessage, UnregisterTriggerTypeMessage,
     },
     triggers::{Trigger, TriggerConfig, TriggerHandler},
-    types::{Channel, RemoteFunctionData, RemoteFunctionHandler, RemoteTriggerTypeData},
+    types::{
+        Channel, HttpRequest, HttpResponse, RemoteFunctionData, RemoteFunctionHandler,
+        RemoteTriggerTypeData, StreamingRequest, StreamingResponse,
+    },
 };
 
 use iii_observability as telemetry;
@@ -1778,6 +1781,161 @@ impl III {
 // them; user code must continue to go through `crate::helpers::*`.
 // ---------------------------------------------------------------------------
 
+// =============================================================================
+// HTTP handler helpers
+// =============================================================================
+
+/// Extract the request-body channel reference from a raw HTTP-invocation wire
+/// value (`InternalHttpRequest`). Returns `None` if the `request_body` field is
+/// missing or is not a [`StreamChannelRef`].
+pub(crate) fn parse_request_body_ref(wire: &Value) -> Option<StreamChannelRef> {
+    serde_json::from_value(wire.get("request_body")?.clone()).ok()
+}
+
+/// Extract the response channel reference from a raw HTTP-invocation wire value
+/// (`InternalHttpRequest`). Returns `None` if the `response` field is missing or
+/// is not a [`StreamChannelRef`].
+pub(crate) fn parse_response_ref(wire: &Value) -> Option<StreamChannelRef> {
+    serde_json::from_value(wire.get("response")?.clone()).ok()
+}
+
+/// Adapt a `(HttpRequest, StreamingResponse)` async handler into the raw
+/// [`RemoteFunctionHandler`] the engine invokes for an HTTP function.
+///
+/// The buffered request is deserialized from the raw wire value, and the
+/// response channel is reconstructed from the `response` channel ref using
+/// `engine_ws_base` (the same WebSocket base URL passed to
+/// [`register_worker`](crate::register_worker)). If the user handler returns
+/// `Some(HttpResponse)` it is serialized back to JSON for the engine; `None`
+/// indicates the handler streamed the response itself via the
+/// [`StreamingResponse`].
+///
+/// # Examples
+/// ```rust,no_run
+/// use iii_sdk::{http, register_worker, HttpResponse, InitOptions, RegisterFunction};
+/// use std::collections::HashMap;
+///
+/// let iii = register_worker("ws://localhost:49134", InitOptions::default());
+/// let handler = http("ws://localhost:49134", |_req, res| async move {
+///     res.status(200).await.ok();
+///     res.close().await.ok();
+///     None
+/// });
+/// iii.register_function("my::api", RegisterFunction::new_async(handler));
+/// ```
+pub fn http<F, Fut>(
+    engine_ws_base: impl Into<String>,
+    callback: F,
+) -> impl Fn(Value) -> BoxFuture<'static, Result<Value, IIIError>> + Send + Sync + 'static
+where
+    F: Fn(HttpRequest, StreamingResponse) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Option<HttpResponse>> + Send + 'static,
+{
+    let ws_base = engine_ws_base.into();
+    let callback = Arc::new(callback);
+    move |wire: Value| {
+        let ws_base = ws_base.clone();
+        let callback = callback.clone();
+        Box::pin(async move {
+            let request: HttpRequest = serde_json::from_value(wire.clone())
+                .map_err(|e| IIIError::Serde(e.to_string()))?;
+            let response_ref = parse_response_ref(&wire)
+                .ok_or_else(|| IIIError::Serde("missing 'response' channel ref".into()))?;
+            let response =
+                StreamingResponse::new(ChannelWriter::new(&ws_base, &response_ref));
+            let result = callback(request, response).await;
+            match result {
+                Some(resp) => {
+                    serde_json::to_value(&resp).map_err(|e| IIIError::Serde(e.to_string()))
+                }
+                None => Ok(Value::Null),
+            }
+        })
+    }
+}
+
+/// Adapt a `(StreamingRequest, StreamingResponse)` async handler into the raw
+/// [`RemoteFunctionHandler`] the engine invokes for a streaming HTTP function.
+///
+/// Both the request body reader and the response writer are reconstructed from
+/// their channel refs using `engine_ws_base` (the same WebSocket base URL passed
+/// to [`register_worker`](crate::register_worker)). If the user handler returns
+/// `Some(HttpResponse)` it is serialized back to JSON for the engine; `None`
+/// indicates the handler streamed the response itself.
+///
+/// # Examples
+/// ```rust,no_run
+/// use iii_sdk::{http_stream, register_worker, InitOptions, RegisterFunction};
+///
+/// let iii = register_worker("ws://localhost:49134", InitOptions::default());
+/// let handler = http_stream("ws://localhost:49134", |_req, res| async move {
+///     res.status(200).await.ok();
+///     res.close().await.ok();
+///     None
+/// });
+/// iii.register_function("my::stream", RegisterFunction::new_async(handler));
+/// ```
+pub fn http_stream<F, Fut>(
+    engine_ws_base: impl Into<String>,
+    callback: F,
+) -> impl Fn(Value) -> BoxFuture<'static, Result<Value, IIIError>> + Send + Sync + 'static
+where
+    F: Fn(StreamingRequest, StreamingResponse) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Option<HttpResponse>> + Send + 'static,
+{
+    let ws_base = engine_ws_base.into();
+    let callback = Arc::new(callback);
+    move |wire: Value| {
+        let ws_base = ws_base.clone();
+        let callback = callback.clone();
+        Box::pin(async move {
+            let response_ref = parse_response_ref(&wire)
+                .ok_or_else(|| IIIError::Serde("missing 'response' channel ref".into()))?;
+            let request_body_ref = parse_request_body_ref(&wire)
+                .ok_or_else(|| IIIError::Serde("missing 'request_body' channel ref".into()))?;
+
+            let request = StreamingRequest {
+                query_params: parse_string_map(&wire, "query_params"),
+                path_params: parse_string_map(&wire, "path_params"),
+                headers: parse_string_map(&wire, "headers"),
+                path: wire
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                method: wire
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                request_body: ChannelReader::new(&ws_base, &request_body_ref),
+            };
+            let response =
+                StreamingResponse::new(ChannelWriter::new(&ws_base, &response_ref));
+            let result = callback(request, response).await;
+            match result {
+                Some(resp) => {
+                    serde_json::to_value(&resp).map_err(|e| IIIError::Serde(e.to_string()))
+                }
+                None => Ok(Value::Null),
+            }
+        })
+    }
+}
+
+/// Read a `HashMap<String, String>` from a JSON object field, defaulting to an
+/// empty map when the field is missing or not an object.
+fn parse_string_map(wire: &Value, key: &str) -> HashMap<String, String> {
+    wire.get(key)
+        .and_then(Value::as_object)
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) async fn internal_create_channel(
     iii: &III,
     buffer_size: Option<usize>,
@@ -1981,6 +2139,21 @@ mod tests {
         };
         let out = handler(json!({"name": "world"})).await.unwrap();
         assert_eq!(out, json!({"echo": {"name": "world"}}));
+    }
+
+    #[test]
+    fn parse_request_body_ref_reads_wire() {
+        let wire = serde_json::json!({
+            "path": "/up", "method": "POST",
+            "query_params": {}, "path_params": {}, "headers": {},
+            "body": null,
+            "request_body": {"channel_id": "c1", "access_key": "k1", "direction": "read"},
+            "response": {"channel_id": "c2", "access_key": "k2", "direction": "write"}
+        });
+        let reader_ref = parse_request_body_ref(&wire).unwrap();
+        assert_eq!(reader_ref.channel_id, "c1");
+        let resp_ref = parse_response_ref(&wire).unwrap();
+        assert_eq!(resp_ref.channel_id, "c2");
     }
 
     #[tokio::test]
