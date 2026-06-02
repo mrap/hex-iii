@@ -1,6 +1,6 @@
 use iii_observability::{Logger, execute_traced_request};
 use iii_sdk::builtin_triggers::{HttpMethod, HttpTriggerConfig};
-use iii_sdk::{ApiRequest, ApiResponse, III, IIIError, IIITrigger, RegisterFunction};
+use iii_sdk::{HttpRequest, HttpResponse, III, IIIError, IIITrigger, RegisterFunction};
 use serde_json::json;
 
 pub fn setup(iii: &III) {
@@ -36,13 +36,13 @@ pub fn setup(iii: &III) {
                     .await
                     .map_err(|e| IIIError::Handler(e.to_string()))?;
 
-                let api_response = ApiResponse {
+                let http_response = HttpResponse {
                     status_code: 200,
                     body: json!({ "upstream_status": status, "data": data }),
                     headers: [("Content-Type".into(), "application/json".into())].into(),
                 };
 
-                Ok(serde_json::to_value(api_response)?)
+                Ok(serde_json::to_value(http_response)?)
             }
         }),
     );
@@ -60,7 +60,7 @@ pub fn setup(iii: &III) {
             let client = post_client.clone();
             async move {
                 let logger = Logger::new();
-                let req: ApiRequest = serde_json::from_value(input)
+                let req: HttpRequest = serde_json::from_value(input)
                     .unwrap_or_else(|_| serde_json::from_value(json!({})).unwrap());
 
                 logger.info("Posting to httpbin", Some(json!({ "body": req.body })));
@@ -90,13 +90,13 @@ pub fn setup(iii: &III) {
                     .await
                     .map_err(|e| IIIError::Handler(e.to_string()))?;
 
-                let api_response = ApiResponse {
+                let http_response = HttpResponse {
                     status_code: status,
                     body: json!({ "upstream_status": status, "data": data }),
                     headers: [("Content-Type".into(), "application/json".into())].into(),
                 };
 
-                Ok(serde_json::to_value(api_response)?)
+                Ok(serde_json::to_value(http_response)?)
             }
         }),
     );
