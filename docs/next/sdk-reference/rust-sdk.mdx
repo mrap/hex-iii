@@ -169,7 +169,9 @@ iii-observability for the export side.
 
 ## Connection state
 
-`IIIConnectionState` is the public enum mirroring the wire-level connection lifecycle.
+`IIIConnectionState` is the public enum mirroring the wire-level connection lifecycle. It is
+exported from the `iii_sdk::types` submodule (`use iii_sdk::types::IIIConnectionState;`), not the
+crate root.
 
 ```rust
 pub enum IIIConnectionState {
@@ -183,7 +185,8 @@ pub enum IIIConnectionState {
 
 ## Info types
 
-The SDK re-exports the engine's structured introspection types:
+The SDK re-exports the engine's structured introspection types from the `iii_sdk::types`
+submodule (e.g. `use iii_sdk::types::FunctionInfo;`):
 
 - `FunctionInfo`. `function_id`, optional `description`, optional `request_format` /
   `response_format`, optional `metadata`.

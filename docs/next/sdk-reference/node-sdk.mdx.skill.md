@@ -166,10 +166,12 @@ The SDK re-exports the structured types the engine returns when listing system s
 `MessageType` is a runtime enum naming every wire frame the SDK exchanges with the engine
 (`RegisterFunction`, `InvokeFunction`, `InvocationResult`, `RegisterTrigger`, `WorkerRegistered`,
 and the rest). Callers rarely use it directly; it surfaces in middleware hooks and protocol-level
-custom code.
+custom code. It is exported as a type from the `iii-sdk/types` subpath
+(`import type { MessageType } from 'iii-sdk/types'`), not the package root.
 
 ## Connection state
 
 The connection-state literal union (`"disconnected" | "connecting" | "connected" | "reconnecting"
-| "failed"`) is internal in the current build. Treat the connection as established once
-`registerWorker` returns; failures raise on the first SDK call.
+| "failed"`) is exported as the `IIIConnectionState` type from the `iii-sdk/types` subpath
+(`import type { IIIConnectionState } from 'iii-sdk/types'`). Treat the connection as established
+once `registerWorker` returns; failures raise on the first SDK call.

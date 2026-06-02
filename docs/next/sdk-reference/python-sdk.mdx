@@ -172,7 +172,8 @@ it from `iii.iii_types` when needed. `WorkerMetadata` is not part of this SDK.
 ## `MessageType`
 
 A runtime enum naming every wire frame the SDK exchanges with the engine. Used internally by
-middleware; rarely needed by callers.
+middleware; rarely needed by callers. Imported from the `iii.types` submodule
+(`from iii.types import MessageType`), not the package root.
 
 ## `RegisterFunctionFormat`
 
@@ -182,5 +183,6 @@ Accepts either a JSON Schema dict directly or constructed values; both forms rea
 ## Connection state
 
 `IIIConnectionState` is the literal-type alias `"disconnected" | "connecting" | "connected" |
-"reconnecting" | "failed"`. It is defined in `iii.iii_constants` but not re-exported from the
-package root; treat the connection as established once `register_worker` returns.
+"reconnecting" | "failed"`. Imported from the `iii.types` submodule
+(`from iii.types import IIIConnectionState`), not the package root; treat the connection as
+established once `register_worker` returns.

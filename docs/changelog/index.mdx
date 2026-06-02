@@ -5,6 +5,28 @@ owner: "devrel"
 type: "reference"
 ---
 
+<Update label="0.18.0" description="June 2026">
+  ## Type declarations moved to a `types` submodule
+
+  **Breaking.** A set of type/data declarations is no longer exported from the package root. Import
+  them from the SDK's `types` submodule instead:
+
+  | Symbol | SDK(s) | Before | After |
+  |---|---|---|---|
+  | `HttpMethod` | Rust | `use iii_sdk::HttpMethod;` | `use iii_sdk::types::HttpMethod;` |
+  | `FunctionInfo`, `TriggerInfo`, `WorkerInfo`, `WorkerMetadata` | Rust | `use iii_sdk::WorkerInfo;` | `use iii_sdk::types::WorkerInfo;` |
+  | `IIIConnectionState` | Rust | `use iii_sdk::IIIConnectionState;` | `use iii_sdk::types::IIIConnectionState;` |
+  | `MessageType` | Python | `from iii import MessageType` | `from iii.types import MessageType` |
+  | `MessageType` | Node | `import { MessageType } from 'iii-sdk'` | `import type { MessageType } from 'iii-sdk/types'` |
+
+  In Python and Node, `IIIConnectionState` is now also reachable from the same `types` submodule
+  (`from iii.types import IIIConnectionState` / `import type { IIIConnectionState } from 'iii-sdk/types'`).
+  The root continues to export the runtime API — `register_worker` / `registerWorker`, the client
+  handle, triggers, channels, and errors — unchanged.
+
+  See [the migration entry](./0-18-0/move-types-to-types-submodule) for the full before/after diff per SDK.
+</Update>
+
 <Update label="0.16.0" description="May 2026">
   ## Single `register_function` entry point in the Rust SDK
 

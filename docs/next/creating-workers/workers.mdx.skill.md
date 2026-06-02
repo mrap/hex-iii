@@ -82,7 +82,8 @@ process can be deployed anywhere reachable on the network.
   </Tab>
   <Tab title="Rust">
     ```rust
-    use iii_sdk::{InitOptions, WorkerMetadata, register_worker};
+    use iii_sdk::types::WorkerMetadata;
+    use iii_sdk::{InitOptions, register_worker};
 
     let url = std::env::var("III_URL").expect("III_URL must be set");
     let worker = register_worker(
