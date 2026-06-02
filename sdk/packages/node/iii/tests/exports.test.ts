@@ -23,4 +23,11 @@ describe('Package Exports', () => {
     expect(stateModule.StateEventType).toBeDefined()
     expect(Object.keys(stateModule).length).toBeGreaterThan(0)
   })
+
+  it('should import types module', async () => {
+    // `iii-sdk/types` holds type-only re-exports (MessageType, IIIConnectionState)
+    // relocated from the root in 0.18.0. The compile-time boundary is enforced by
+    // tests/relocation-guard.ts; this just confirms the entry point resolves.
+    await expect(import('../src/public-types')).resolves.toBeDefined()
+  })
 })
