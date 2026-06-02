@@ -3,8 +3,8 @@ import * as path from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { http, type ApiResponse, type HttpRequest } from '../src'
-import type { HttpResponse } from '../src/types'
+import type { HttpRequest, HttpResponse, StreamingRequest, StreamingResponse } from '../src/types'
+import { http, httpStream } from '../src/utils'
 import { engineHttpUrl, execute, httpRequest, iii, sleep } from './utils'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -14,10 +14,12 @@ describe('API Triggers', () => {
   it('should register GET endpoint', async () => {
     const fn = iii.registerFunction(
       'test.api.get',
-      async (_req: HttpRequest): Promise<ApiResponse> => ({
-        status_code: 200,
-        body: { message: 'Hello from GET' },
-      }),
+      http(
+        async (_req: HttpRequest): Promise<HttpResponse> => ({
+          status_code: 200,
+          body: { message: 'Hello from GET' },
+        }),
+      ),
     )
 
     const trigger = iii.registerTrigger({
@@ -43,13 +45,13 @@ describe('API Triggers', () => {
   it('should register POST endpoint with body', async () => {
     const fn = iii.registerFunction(
       'test.api.post',
-      async (req: HttpRequest): Promise<ApiResponse> => {
+      http(async (req: HttpRequest): Promise<HttpResponse> => {
         const body = (req.body as Record<string, unknown>) ?? {}
         return {
           status_code: 201,
           body: { received: body, created: true },
         }
-      },
+      }),
     )
 
     const trigger = iii.registerTrigger({
@@ -78,16 +80,17 @@ describe('API Triggers', () => {
 
     const fn = iii.registerFunction(
       'test::api::json::raw',
-      http(async (req: HttpRequest, response: HttpResponse) => {
+      httpStream(async (req: StreamingRequest, response: StreamingResponse) => {
         const rawBody = await req.request_body.readAll()
+        const rawText = rawBody.toString('utf-8')
 
         response.status(200)
         response.headers({ 'content-type': 'application/json' })
         response.stream.end(
           Buffer.from(
             JSON.stringify({
-              parsed_body: req.body,
-              raw_body: rawBody.toString('utf-8'),
+              parsed_body: JSON.parse(rawText),
+              raw_body: rawText,
             }),
           ),
         )
@@ -124,10 +127,12 @@ describe('API Triggers', () => {
   it('should handle path parameters', async () => {
     const fn = iii.registerFunction(
       'test.api.getById',
-      async (req: HttpRequest): Promise<ApiResponse> => ({
-        status_code: 200,
-        body: { id: req.path_params?.id },
-      }),
+      http(
+        async (req: HttpRequest): Promise<HttpResponse> => ({
+          status_code: 200,
+          body: { id: req.path_params?.id },
+        }),
+      ),
     )
 
     const trigger = iii.registerTrigger({
@@ -153,7 +158,7 @@ describe('API Triggers', () => {
   it('should handle query parameters', async () => {
     const fn = iii.registerFunction(
       'test.api.search',
-      async (req: HttpRequest): Promise<ApiResponse> => {
+      http(async (req: HttpRequest): Promise<HttpResponse> => {
         const q = req.query_params?.q
         const limit = req.query_params?.limit
         const qVal = Array.isArray(q) ? q[0] : q
@@ -162,7 +167,7 @@ describe('API Triggers', () => {
           status_code: 200,
           body: { query: qVal, limit: limitVal },
         }
-      },
+      }),
     )
 
     const trigger = iii.registerTrigger({
@@ -189,10 +194,12 @@ describe('API Triggers', () => {
   it('should return custom status code', async () => {
     const fn = iii.registerFunction(
       'test.api.notfound',
-      async (_req: HttpRequest): Promise<ApiResponse<404>> => ({
-        status_code: 404,
-        body: { error: 'Not found' },
-      }),
+      http(
+        async (_req: HttpRequest): Promise<HttpResponse<404>> => ({
+          status_code: 404,
+          body: { error: 'Not found' },
+        }),
+      ),
     )
 
     const trigger = iii.registerTrigger({
@@ -215,15 +222,18 @@ describe('API Triggers', () => {
     trigger.unregister()
   })
 
-  it('should honor Content-Type header when returning ApiResponse with string body', async () => {
-    const xmlBody = '<?xml version="1.0" encoding="UTF-8"?><note><to>user</to><body>hello</body></note>'
+  it('should honor Content-Type header when returning HttpResponse with string body', async () => {
+    const xmlBody =
+      '<?xml version="1.0" encoding="UTF-8"?><note><to>user</to><body>hello</body></note>'
     const fn = iii.registerFunction(
       'test.api.xml.return',
-      async (_req: HttpRequest): Promise<ApiResponse> => ({
-        status_code: 200,
-        headers: { 'Content-Type': 'text/xml' },
-        body: xmlBody,
-      }),
+      http(
+        async (_req: HttpRequest): Promise<HttpResponse> => ({
+          status_code: 200,
+          headers: { 'Content-Type': 'text/xml' },
+          body: xmlBody,
+        }),
+      ),
     )
 
     const trigger = iii.registerTrigger({
@@ -250,7 +260,7 @@ describe('API Triggers', () => {
     const originalPdf = fs.readFileSync(pdfPath)
     const fn = iii.registerFunction(
       'test.api.download.pdf',
-      http(async (_req: HttpRequest, response: HttpResponse) => {
+      http(async (_req: HttpRequest, response: StreamingResponse) => {
         const fileStream = fs.createReadStream(pdfPath)
 
         response.status(200)
@@ -290,7 +300,7 @@ describe('API Triggers', () => {
 
     const fn = iii.registerFunction(
       'test.api.upload.pdf',
-      http(async (req: HttpRequest, response: HttpResponse) => {
+      httpStream(async (req: StreamingRequest, response: StreamingResponse) => {
         const chunks: Buffer[] = []
 
         response.status(200)
@@ -345,7 +355,7 @@ describe('API Triggers', () => {
 
     const fn = iii.registerFunction(
       'test.api.sse',
-      http(async (_req: HttpRequest, response: HttpResponse) => {
+      http(async (_req: HttpRequest, response: StreamingResponse) => {
         response.status(200)
         response.headers({
           'content-type': 'text/event-stream',
@@ -419,7 +429,7 @@ describe('API Triggers', () => {
   it('should handle application/x-www-form-urlencoded request', async () => {
     const fn = iii.registerFunction(
       'test.api.form.urlencoded',
-      http(async (req: HttpRequest, response: HttpResponse) => {
+      httpStream(async (req: StreamingRequest, response: StreamingResponse) => {
         const chunks: Buffer[] = []
 
         for await (const chunk of req.request_body.stream) {
@@ -482,7 +492,7 @@ describe('API Triggers', () => {
 
     const fn = iii.registerFunction(
       'test.api.form.multipart',
-      http(async (req: HttpRequest, response: HttpResponse) => {
+      httpStream(async (req: StreamingRequest, response: StreamingResponse) => {
         const chunks: Buffer[] = []
 
         for await (const chunk of req.request_body.stream) {

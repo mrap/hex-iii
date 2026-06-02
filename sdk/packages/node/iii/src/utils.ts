@@ -1,7 +1,14 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+import type { ChannelWriter } from './channels'
 import type { StreamChannelRef } from './iii-types'
-import type { ApiResponse, HttpRequest, HttpResponse, InternalHttpRequest } from './types'
+import type {
+  HttpRequest,
+  HttpResponse,
+  InternalHttpRequest,
+  StreamingRequest,
+  StreamingResponse,
+} from './types'
 
 /**
  * Returns a project identifier for telemetry, derived from the current working
@@ -30,11 +37,20 @@ export function detectProjectName(cwd: string = process.cwd()): string | undefin
   return base || undefined
 }
 
+const makeStreamingResponse = (response: ChannelWriter): StreamingResponse => ({
+  status: (status_code: number) =>
+    response.sendMessage(JSON.stringify({ type: 'set_status', status_code })),
+  headers: (headers: Record<string, string>) =>
+    response.sendMessage(JSON.stringify({ type: 'set_headers', headers })),
+  stream: response.stream,
+  close: () => response.close(),
+})
+
 /**
- * Helper that wraps an HTTP-style handler (with separate `req`/`res` arguments)
- * into the function handler format expected by the SDK.
+ * Wrap a buffered HTTP handler. The handler receives a buffered {@link HttpRequest}
+ * and a {@link StreamingResponse}; it may return an {@link HttpResponse} or stream via `res`.
  *
- * @param callback - Async handler receiving an {@link HttpRequest} and {@link HttpResponse}.
+ * @param callback - Async handler receiving an {@link HttpRequest} and {@link StreamingResponse}.
  * @returns A function handler compatible with {@link ISdk.registerFunction}.
  *
  * @example
@@ -43,32 +59,49 @@ export function detectProjectName(cwd: string = process.cwd()): string | undefin
  *
  * iii.registerFunction(
  *   'my-api',
- *   http(async (req, res) => {
- *     res.status(200)
- *     res.headers({ 'content-type': 'application/json' })
- *     res.stream.end(JSON.stringify({ hello: 'world' }))
- *     res.close()
+ *   http(async (req) => {
+ *     return { status_code: 200, body: { hello: req.body } }
  *   }),
  * )
  * ```
  */
 export const http = (
   // biome-ignore lint/suspicious/noConfusingVoidType: void is necessary here
-  callback: (req: HttpRequest, res: HttpResponse) => Promise<void | ApiResponse>,
+  callback: (req: HttpRequest, res: StreamingResponse) => Promise<void | HttpResponse>,
 ) => {
   return async (req: InternalHttpRequest) => {
-    const { response, ...request } = req
+    const { response, request_body: _requestBody, ...request } = req
+    return callback(request as HttpRequest, makeStreamingResponse(response))
+  }
+}
 
-    const httpResponse: HttpResponse = {
-      status: (status_code: number) =>
-        response.sendMessage(JSON.stringify({ type: 'set_status', status_code })),
-      headers: (headers: Record<string, string>) =>
-        response.sendMessage(JSON.stringify({ type: 'set_headers', headers })),
-      stream: response.stream,
-      close: () => response.close(),
-    }
-
-    return callback(request, httpResponse)
+/**
+ * Wrap a streaming HTTP handler. The handler receives a {@link StreamingRequest}
+ * (exposing `request_body`) and a {@link StreamingResponse}.
+ *
+ * @param callback - Async handler receiving a {@link StreamingRequest} and {@link StreamingResponse}.
+ * @returns A function handler compatible with {@link ISdk.registerFunction}.
+ *
+ * @example
+ * ```typescript
+ * import { httpStream } from 'iii-sdk'
+ *
+ * iii.registerFunction(
+ *   'my-api',
+ *   httpStream(async (req, res) => {
+ *     for await (const chunk of req.request_body.stream) res.stream.write(chunk)
+ *     res.close()
+ *   }),
+ * )
+ * ```
+ */
+export const httpStream = (
+  // biome-ignore lint/suspicious/noConfusingVoidType: void is necessary here
+  callback: (req: StreamingRequest, res: StreamingResponse) => Promise<void | HttpResponse>,
+) => {
+  return async (req: InternalHttpRequest) => {
+    const { response, body: _body, ...request } = req
+    return callback(request as StreamingRequest, makeStreamingResponse(response))
   }
 }
 
