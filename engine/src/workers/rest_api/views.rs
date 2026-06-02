@@ -19,7 +19,7 @@ use tracing::Instrument;
 
 use crate::{
     condition::check_condition,
-    workers::rest_api::types::{HttpRequest, HttpResponse},
+    workers::rest_api::types::{HttpResponse, InternalHttpRequest},
     workers::worker::channels::ChannelItem,
 };
 
@@ -434,7 +434,7 @@ pub async fn dynamic_handler(
                 Value::Null
             };
 
-            let api_request_value = HttpRequest {
+            let api_request_value = InternalHttpRequest {
                 query_params,
                 path_params: path_parameters,
                 headers: serialize_headers(&headers),
@@ -1456,7 +1456,7 @@ mod tests {
     use crate::protocol::ErrorBody;
     use crate::workers::observability::metrics::ensure_default_meter;
     use crate::workers::rest_api::api_core::{HttpWorker, PathRouter};
-    use crate::workers::rest_api::types::HttpRequest;
+    use crate::workers::rest_api::types::InternalHttpRequest;
     use crate::workers::worker::channels::ChannelItem;
     use axum::http::Method;
 
@@ -1510,7 +1510,7 @@ mod tests {
 
     async fn drain_request_body_channel(
         engine: &Engine,
-        request: &HttpRequest,
+        request: &InternalHttpRequest,
         timeout_message: &'static str,
     ) -> Vec<u8> {
         let mut rx = engine
@@ -2158,7 +2158,7 @@ mod tests {
             Handler::new(move |input: Value| {
                 let engine = engine_for_handler.clone();
                 async move {
-                    let request: HttpRequest = serde_json::from_value(input).unwrap();
+                    let request: InternalHttpRequest = serde_json::from_value(input).unwrap();
                     let raw = drain_request_body_channel(
                         &engine,
                         &request,
@@ -2222,7 +2222,7 @@ mod tests {
             Handler::new(move |input: Value| {
                 let engine = engine_for_handler.clone();
                 async move {
-                    let request: HttpRequest = serde_json::from_value(input).unwrap();
+                    let request: InternalHttpRequest = serde_json::from_value(input).unwrap();
                     let raw = drain_request_body_channel(
                         &engine,
                         &request,
@@ -2471,7 +2471,7 @@ mod tests {
             Handler::new(move |input: Value| {
                 let engine = engine_for_handler.clone();
                 async move {
-                    let request: HttpRequest = serde_json::from_value(input).unwrap();
+                    let request: InternalHttpRequest = serde_json::from_value(input).unwrap();
                     let tx = engine
                         .channel_manager
                         .take_sender(&request.response.channel_id, &request.response.access_key)
@@ -2549,7 +2549,7 @@ mod tests {
             Handler::new(move |input: Value| {
                 let engine = engine_for_handler.clone();
                 async move {
-                    let request: HttpRequest = serde_json::from_value(input).unwrap();
+                    let request: InternalHttpRequest = serde_json::from_value(input).unwrap();
                     let tx = engine
                         .channel_manager
                         .take_sender(&request.response.channel_id, &request.response.access_key)

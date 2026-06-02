@@ -27,7 +27,7 @@ pub struct TriggerMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HttpRequest {
+pub struct InternalHttpRequest {
     pub query_params: HashMap<String, String>,
     pub path_params: HashMap<String, String>,
     pub headers: HashMap<String, String>,
@@ -376,12 +376,12 @@ mod tests {
     }
 
     // =========================================================================
-    // HttpRequest serialization
+    // InternalHttpRequest serialization
     // =========================================================================
 
     #[test]
-    fn http_request_serialize_deserialize() {
-        let req = HttpRequest {
+    fn internal_http_request_serialize_deserialize() {
+        let req = InternalHttpRequest {
             query_params: {
                 let mut m = HashMap::new();
                 m.insert("page".to_string(), "1".to_string());
@@ -409,7 +409,7 @@ mod tests {
             },
         };
         let json_str = serde_json::to_string(&req).unwrap();
-        let deserialized: HttpRequest = serde_json::from_str(&json_str).unwrap();
+        let deserialized: InternalHttpRequest = serde_json::from_str(&json_str).unwrap();
         assert_eq!(deserialized.path, "/api/test");
         assert_eq!(deserialized.method, "GET");
         assert_eq!(
@@ -420,8 +420,8 @@ mod tests {
     }
 
     #[test]
-    fn http_request_with_trigger() {
-        let req = HttpRequest {
+    fn internal_http_request_with_trigger() {
+        let req = InternalHttpRequest {
             query_params: HashMap::new(),
             path_params: HashMap::new(),
             headers: HashMap::new(),
@@ -447,5 +447,35 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("trigger").is_some());
         assert_eq!(json["trigger"]["type"], "http");
+    }
+
+    #[test]
+    fn internal_http_request_wire_field_names_are_stable() {
+        let req = InternalHttpRequest {
+            query_params: HashMap::new(),
+            path_params: HashMap::new(),
+            headers: HashMap::new(),
+            path: "/x".to_string(),
+            method: "GET".to_string(),
+            body: json!(null),
+            trigger: None,
+            request_body: StreamChannelRef {
+                channel_id: "c1".to_string(),
+                access_key: "k1".to_string(),
+                direction: crate::protocol::ChannelDirection::Read,
+            },
+            response: StreamChannelRef {
+                channel_id: "c2".to_string(),
+                access_key: "k2".to_string(),
+                direction: crate::protocol::ChannelDirection::Write,
+            },
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        for key in [
+            "query_params", "path_params", "headers", "path", "method", "body",
+            "request_body", "response",
+        ] {
+            assert!(v.get(key).is_some(), "wire field `{key}` missing");
+        }
     }
 }
