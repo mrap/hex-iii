@@ -24,7 +24,6 @@ export type {
   RegisterTriggerMessage,
   RegisterTriggerTypeMessage,
   StreamChannelRef,
-  TriggerAction as TriggerActionType,
   TriggerRequest,
 } from './iii-types'
 

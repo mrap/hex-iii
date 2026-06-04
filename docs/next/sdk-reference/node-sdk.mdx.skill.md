@@ -103,8 +103,7 @@ TriggerAction.Void();                       // fire-and-forget
 TriggerAction.Enqueue({ queue: "math" });   // route through iii-queue
 ```
 
-The underlying type is the discriminated union `{ type: "enqueue"; queue: string } | { type: "void" }`,
-exported as `TriggerActionType`.
+The underlying type is the discriminated union `{ type: "enqueue"; queue: string } | { type: "void" }`.
 
 ## Error type
 
