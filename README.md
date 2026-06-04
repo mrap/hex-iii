@@ -79,14 +79,21 @@ trace.
   <img src=".github/assets/iii-intro-preview.gif" alt="Watch the iii intro (click to play)" width="720"/>
 </a>
 
+Install `iii`:
+
+```bash
+curl -fsSL https://install.iii.dev/iii/main/install.sh | sh
+```
+
+Then scaffold and start a project:
+
 ```bash
 iii project init myapp    # scaffold a project
 cd myapp
 iii                       # start the engine
 ```
 
-Need to install `iii` first? Full walkthrough at the
-[Quickstart guide](https://iii.dev/docs/quickstart).
+Full walkthrough at the [Quickstart guide](https://iii.dev/docs/quickstart).
 
 ## Add Workers
 
