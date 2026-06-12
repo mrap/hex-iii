@@ -159,6 +159,7 @@ fn minimal_config_for_builder_tests() -> iii::workers::config::EngineConfig {
         modules: Vec::new(),
         workers: vec![iii::workers::config::WorkerEntry {
             name: "iii-worker-manager".to_string(),
+            kind: None,
             image: None,
             config: Some(serde_json::json!({
                 "host": "127.0.0.1",
@@ -229,6 +230,7 @@ async fn serve_returns_on_sigterm() {
         modules: Vec::new(),
         workers: vec![iii::workers::config::WorkerEntry {
             name: "iii-worker-manager".to_string(),
+            kind: None,
             image: None,
             config: Some(serde_json::json!({
                 "host": "127.0.0.1",

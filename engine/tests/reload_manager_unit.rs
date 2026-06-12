@@ -219,6 +219,7 @@ impl Worker for TestWorker {
 fn running_worker(name: &str, alive: bool) -> RunningWorker {
     let entry = WorkerEntry {
         name: name.to_string(),
+        kind: None,
         image: None,
         config: None,
     };
@@ -239,6 +240,7 @@ async fn promote_dead_unchanged_leaves_live_workers_alone() {
     let running = vec![running_worker("alive-worker", true)];
     let new_entries = vec![WorkerEntry {
         name: "alive-worker".into(),
+        kind: None,
         image: None,
         config: None,
     }];
@@ -267,11 +269,13 @@ async fn promote_dead_unchanged_revives_dead_worker() {
     let new_entries = vec![
         WorkerEntry {
             name: "alive-worker".into(),
+            kind: None,
             image: None,
             config: None,
         },
         WorkerEntry {
             name: "dead-worker".into(),
+            kind: None,
             image: None,
             config: None,
         },
@@ -296,6 +300,7 @@ async fn promote_dead_unchanged_skips_entries_without_a_tracked_worker() {
     let running: Vec<RunningWorker> = Vec::new();
     let new_entries = vec![WorkerEntry {
         name: "orphan".into(),
+        kind: None,
         image: None,
         config: None,
     }];

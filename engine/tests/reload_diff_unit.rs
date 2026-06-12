@@ -5,6 +5,7 @@ use serde_json::json;
 fn entry(name: &str, cfg: Option<serde_json::Value>) -> WorkerEntry {
     WorkerEntry {
         name: name.to_string(),
+        kind: None,
         image: None,
         config: cfg,
     }
