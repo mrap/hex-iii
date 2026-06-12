@@ -1058,6 +1058,7 @@ mod tests {
         let cfg = EngineConfig {
             modules: vec![WorkerEntry {
                 name: "iii-observability".to_string(),
+                kind: None,
                 image: None,
                 config: Some(serde_json::json!({
                     "enabled": true,
@@ -1086,6 +1087,7 @@ mod tests {
             modules: vec![],
             workers: vec![WorkerEntry {
                 name: "iii-observability".to_string(),
+                kind: None,
                 image: None,
                 config: Some(serde_json::json!({
                     "enabled": true,

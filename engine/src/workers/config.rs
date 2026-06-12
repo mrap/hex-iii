@@ -148,6 +148,7 @@ impl EngineConfig {
             }
             self.workers.push(WorkerEntry {
                 name: (*name).to_string(),
+                kind: None,
                 image: None,
                 config: None,
             });
@@ -161,15 +162,23 @@ fn default_worker_entries() -> Vec<WorkerEntry> {
         .filter(|registration| registration.is_default)
         .map(|registration| WorkerEntry {
             name: registration.name.to_string(),
+            kind: None,
             image: None,
             config: None,
         })
         .collect()
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Default, Deserialize, Clone, PartialEq)]
 pub struct WorkerEntry {
     pub name: String,
+    /// Optional factory selector. When set, the worker FACTORY is resolved
+    /// from `type` while `name` stays a unique, semantic identity — this is
+    /// how more than one of the same builtin can be hosted (e.g. two
+    /// `type: iii-exec` daemons named `console` and `headroom-proxy`). When
+    /// absent, the factory falls back to `name` (legacy single-instance form).
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
     #[serde(default)]
     pub image: Option<String>,
     #[serde(default)]
@@ -386,10 +395,15 @@ impl Default for WorkerRegistry {
 }
 
 impl WorkerEntry {
-    /// Returns the worker type name used for factory lookup. For entries with
-    /// instance suffixes like `iii-http#1`, this strips the `#N` and returns
-    /// the base name `iii-http`.
+    /// Returns the worker type name used for factory lookup. An explicit
+    /// `type` field wins (letting `name` be a unique semantic identity while
+    /// several entries share one factory). Otherwise the factory is the
+    /// `name`, with any `#N` instance suffix (e.g. `iii-http#1`) stripped back
+    /// to the base name `iii-http`.
     pub fn worker_type(&self) -> &str {
+        if let Some(kind) = &self.kind {
+            return kind;
+        }
         self.name.split('#').next().unwrap_or(&self.name)
     }
 
@@ -620,6 +634,7 @@ impl EngineBuilder {
         if let Some(ref mut cfg) = self.config {
             cfg.workers.push(WorkerEntry {
                 name: name.to_string(),
+                kind: None,
                 image: None,
                 config,
             });
@@ -652,6 +667,7 @@ impl EngineBuilder {
             if registration.mandatory && !worker_names.contains(registration.name) {
                 workers.push(WorkerEntry {
                     name: registration.name.to_string(),
+                    kind: None,
                     image: None,
                     config: None,
                 });
@@ -886,6 +902,40 @@ impl Default for EngineBuilder {
 #[allow(deprecated)]
 mod tests {
     use super::*;
+
+    /// `type` selects the factory while `name` stays a unique semantic
+    /// identity — this is what lets two `iii-exec` daemons coexist under
+    /// distinct names. Without `type`, the factory is the name (with any
+    /// `#N` instance suffix stripped) — the legacy behavior, preserved.
+    #[test]
+    fn worker_type_prefers_explicit_type_else_name() {
+        let typed = WorkerEntry {
+            name: "headroom-proxy".to_string(),
+            kind: Some("iii-exec".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            typed.worker_type(),
+            "iii-exec",
+            "explicit `type` must select the factory, not the semantic name"
+        );
+
+        let legacy = WorkerEntry {
+            name: "iii-exec".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(legacy.worker_type(), "iii-exec", "no type → factory is the name");
+
+        let instanced = WorkerEntry {
+            name: "iii-http#1".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            instanced.worker_type(),
+            "iii-http",
+            "no type → `#N` instance suffix is stripped (legacy behavior preserved)"
+        );
+    }
 
     fn restore_env_var(name: &str, value: Option<std::ffi::OsString>) {
         unsafe {
@@ -1278,6 +1328,7 @@ mod tests {
             modules: Vec::new(),
             workers: vec![WorkerEntry {
                 name: "iii-worker-ops".into(),
+                kind: None,
                 image: None,
                 config: None,
             }],
@@ -1623,6 +1674,7 @@ config:
         // worker name, but it is no longer an immediate "Unknown worker" error.
         let entry = WorkerEntry {
             name: "unknown::Module".to_string(),
+            kind: None,
             image: None,
             config: None,
         };

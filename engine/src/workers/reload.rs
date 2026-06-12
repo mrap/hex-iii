@@ -133,6 +133,7 @@ impl ReloadManager {
             if registration.mandatory && !names.contains(registration.name) {
                 entries.push(WorkerEntry {
                     name: registration.name.to_string(),
+                    kind: None,
                     image: None,
                     config: None,
                 });
