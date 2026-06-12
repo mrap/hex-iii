@@ -47,6 +47,10 @@ pub struct Exec {
 
 const MAX_WATCH_EVENTS: usize = 100;
 
+/// How often the supervisor polls whether the daemon has exited. Detection
+/// latency, not a hot loop — try_wait is a non-blocking waitpid(WNOHANG).
+const EXIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
 impl Exec {
     pub fn new(config: ExecConfig) -> Self {
         tracing::info!("Creating Exec module with config: {:?}", config);
@@ -178,12 +182,11 @@ impl Exec {
             }
         };
 
-        // Hold the daemon outside the mutex so we can await its exit. It is put
-        // back into self.child before any stop/kill so the existing
-        // stop_process/kill_process paths reap it (mirrors run_pipeline's
-        // shutdown handling).
-        let mut daemon: Option<Child> = self.child.lock().await.take();
-
+        // The daemon stays in self.child (run_pipeline left it there) so the
+        // existing stop_process/kill_process/shutdown paths can always reap it.
+        // We detect its exit by polling try_wait rather than owning the Child —
+        // owning it would leave it unreapable by those paths for its whole life
+        // (a shutdown-orphan: a setsid'd daemon left holding its port).
         let (init_backoff, max_backoff) = self
             .restart
             .as_ref()
@@ -203,32 +206,39 @@ impl Exec {
         }
         let mut health_failures: u32 = 0;
 
+        let mut exit_poll = tokio::time::interval(EXIT_POLL_INTERVAL);
+        exit_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        exit_poll.tick().await; // consume the immediate first tick
+
         loop {
             tokio::select! {
-                // 1. The daemon exited on its own.
-                status = wait_opt(&mut daemon) => {
-                    let on_crash = self.restart.as_ref().is_some_and(|r| r.on_crash);
-                    if !on_crash {
-                        tracing::warn!(
-                            "exec daemon '{}' exited ({:?}); no restart.on_crash — left down",
-                            daemon_cmd, status
-                        );
-                        daemon = None; // health/shutdown still served; just no respawn
-                        continue;
-                    }
-                    tracing::error!(
-                        "exec daemon '{}' exited ({:?}); respawning after {}s backoff",
-                        daemon_cmd, status, backoff
-                    );
-                    if backoff > 0 {
-                        tokio::select! {
-                            _ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
-                            _ = shutdown_rx.changed() => { self.stop_process().await; return; }
+                // 1. Poll whether the daemon exited on its own.
+                _ = exit_poll.tick() => {
+                    if let Some(status) = self.take_if_exited().await {
+                        let on_crash = self.restart.as_ref().is_some_and(|r| r.on_crash);
+                        if !on_crash {
+                            tracing::warn!(
+                                "exec daemon '{}' exited ({:?}); no restart.on_crash — left down",
+                                daemon_cmd, status
+                            );
+                            continue;
                         }
+                        tracing::error!(
+                            "exec daemon '{}' exited ({:?}); respawning after {}s backoff",
+                            daemon_cmd, status, backoff
+                        );
+                        if backoff > 0 {
+                            tokio::select! {
+                                _ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
+                                _ = shutdown_rx.changed() => { self.stop_process().await; return; }
+                            }
+                        }
+                        if let Some(child) = self.respawn(&daemon_cmd).await {
+                            *self.child.lock().await = Some(child);
+                        }
+                        backoff = next_backoff(backoff, init_backoff, max_backoff);
+                        health_failures = 0;
                     }
-                    daemon = self.respawn(&daemon_cmd).await;
-                    backoff = next_backoff(backoff, init_backoff, max_backoff);
-                    health_failures = 0;
                 }
                 // 2. Health probe tick.
                 _ = tick_opt(&mut health_timer) => {
@@ -246,11 +256,10 @@ impl Exec {
                                     "exec daemon '{}' failed {} health probes; killing + respawning",
                                     daemon_cmd, h.failure_threshold
                                 );
-                                if let Some(child) = daemon.take() {
+                                self.kill_process().await;
+                                if let Some(child) = self.respawn(&daemon_cmd).await {
                                     *self.child.lock().await = Some(child);
                                 }
-                                self.kill_process().await;
-                                daemon = self.respawn(&daemon_cmd).await;
                                 health_failures = 0;
                             }
                         }
@@ -275,27 +284,44 @@ impl Exec {
                                 .join(", ")
                                 .purple()
                         );
-                        if let Some(child) = daemon.take() {
-                            *self.child.lock().await = Some(child);
-                        }
                         self.kill_process().await;
                         if let Err(e) = self.run_pipeline().await {
                             tracing::error!("pipeline restart failed: {e}");
                         }
-                        daemon = self.child.lock().await.take();
                         backoff = init_backoff;
                         health_failures = 0;
                     }
                 }
                 // 4. Shutdown.
                 _ = shutdown_rx.changed() => {
-                    if let Some(child) = daemon.take() {
-                        *self.child.lock().await = Some(child);
-                    }
                     self.stop_process().await;
                     return;
                 }
             }
+        }
+    }
+
+    /// If the daemon has exited, reap it, clear self.child, and return its
+    /// status. If it is still running, leave it in place and return None. The
+    /// lock is held only for a non-blocking try_wait — never across an await —
+    /// so stop_process/kill_process stay responsive, and a reaped pid never
+    /// lingers in self.child (which could otherwise SIGKILL a recycled pid).
+    async fn take_if_exited(&self) -> Option<std::process::ExitStatus> {
+        let mut guard = self.child.lock().await;
+        match guard.take() {
+            Some(mut child) => match child.try_wait() {
+                Ok(Some(status)) => Some(status), // exited & reaped; leave slot empty
+                Ok(None) => {
+                    *guard = Some(child); // still running; put it back
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!("try_wait on exec daemon failed: {e}");
+                    *guard = Some(child);
+                    None
+                }
+            },
+            None => None,
         }
     }
 
@@ -505,15 +531,6 @@ impl Exec {
     }
 }
 
-/// Await the child's exit when present; otherwise never resolve, so the
-/// `select!` arm is effectively disabled while no daemon is live.
-async fn wait_opt(daemon: &mut Option<Child>) -> Option<std::process::ExitStatus> {
-    match daemon {
-        Some(child) => child.wait().await.ok(),
-        None => std::future::pending().await,
-    }
-}
-
 /// Tick the interval when present; otherwise never resolve.
 async fn tick_opt(timer: &mut Option<tokio::time::Interval>) {
     match timer {
@@ -714,7 +731,8 @@ mod tests {
             async move { exec.run().await }
         });
 
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Several poll intervals (EXIT_POLL_INTERVAL = 200ms) worth of crashes.
+        tokio::time::sleep(Duration::from_millis(900)).await;
         exec.shutdown().await;
         let _ = runner.await.expect("join run task");
 
