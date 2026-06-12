@@ -93,6 +93,7 @@ mod tests {
             watcher: Exec::new(ExecConfig {
                 watch: None,
                 exec: Vec::new(),
+                ..Default::default()
             }),
         };
         assert_eq!(module.name(), "ExecModule");

@@ -25,13 +25,21 @@ use tokio::{
     time::{Duration, timeout},
 };
 
-use crate::workers::shell::{config::ExecConfig, glob_exec::GlobExec};
+use crate::workers::shell::{
+    config::{ExecConfig, HealthCheck, RestartPolicy},
+    glob_exec::GlobExec,
+};
 
 #[derive(Debug, Clone)]
 pub struct Exec {
     exec: Vec<String>,
     glob_exec: Option<GlobExec>,
     child: Arc<Mutex<Option<Child>>>,
+    /// Crash-respawn policy for the long-lived (last) command. None = legacy
+    /// spawn-once, never respawned.
+    restart: Option<RestartPolicy>,
+    /// Liveness probe for the long-lived command. None = never probed.
+    health: Option<HealthCheck>,
     shutdown_tx: Arc<tokio::sync::watch::Sender<bool>>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     shutdown_called: Arc<AtomicBool>,
@@ -48,6 +56,8 @@ impl Exec {
             glob_exec: config.watch.map(GlobExec::new),
             exec: config.exec,
             child: Arc::new(Mutex::new(None::<Child>)),
+            restart: config.restart,
+            health: config.health,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             shutdown_called: Arc::new(AtomicBool::new(false)),
@@ -98,6 +108,15 @@ impl Exec {
         self.run_pipeline().await?;
 
         let mut shutdown_rx = self.shutdown_rx.clone();
+
+        // Supervised daemon: await the long-lived (last) command's exit and
+        // probe its health alongside the file-watcher. Without restart/health
+        // this block is skipped and the legacy watch/shutdown loop runs as-is.
+        if self.restart.is_some() || self.health.is_some() {
+            self.supervise(rx, shutdown_rx, &cwd).await;
+            return Ok(());
+        }
+
         loop {
             tokio::select! {
                 event = rx.recv() => {
@@ -133,6 +152,167 @@ impl Exec {
         }
 
         Ok(())
+    }
+
+    /// Supervise the long-lived (last) command: respawn it on exit (per
+    /// `restart`) and probe its liveness (per `health`), while still honoring
+    /// file-watch restarts and shutdown. Entered from `run()` only when
+    /// `restart` or `health` is configured.
+    async fn supervise(
+        &self,
+        mut rx: mpsc::Receiver<Event>,
+        mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+        cwd: &Path,
+    ) {
+        // The daemon is the last pipeline command (already spawned by
+        // run_pipeline, sitting in self.child). Respawns re-run ONLY this
+        // command — earlier pipeline steps (e.g. a `pkill` cleanup) ran once at
+        // startup and are deliberately not repeated on each crash.
+        let daemon_cmd = match self.exec.last() {
+            Some(cmd) => cmd.clone(),
+            None => {
+                // Nothing long-lived to supervise; just wait for shutdown.
+                let _ = shutdown_rx.changed().await;
+                self.stop_process().await;
+                return;
+            }
+        };
+
+        // Hold the daemon outside the mutex so we can await its exit. It is put
+        // back into self.child before any stop/kill so the existing
+        // stop_process/kill_process paths reap it (mirrors run_pipeline's
+        // shutdown handling).
+        let mut daemon: Option<Child> = self.child.lock().await.take();
+
+        let (init_backoff, max_backoff) = self
+            .restart
+            .as_ref()
+            .map(|r| (r.backoff_secs, r.max_backoff_secs))
+            .unwrap_or((0, 0));
+        let mut backoff = init_backoff;
+
+        let mut health_timer = self.health.as_ref().map(|h| {
+            let mut iv = tokio::time::interval(Duration::from_secs(h.interval_secs.max(1)));
+            iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            iv
+        });
+        // The first interval tick fires immediately; consume it so the daemon
+        // gets one interval to come up before the first probe.
+        if let Some(iv) = health_timer.as_mut() {
+            iv.tick().await;
+        }
+        let mut health_failures: u32 = 0;
+
+        loop {
+            tokio::select! {
+                // 1. The daemon exited on its own.
+                status = wait_opt(&mut daemon) => {
+                    let on_crash = self.restart.as_ref().is_some_and(|r| r.on_crash);
+                    if !on_crash {
+                        tracing::warn!(
+                            "exec daemon '{}' exited ({:?}); no restart.on_crash — left down",
+                            daemon_cmd, status
+                        );
+                        daemon = None; // health/shutdown still served; just no respawn
+                        continue;
+                    }
+                    tracing::error!(
+                        "exec daemon '{}' exited ({:?}); respawning after {}s backoff",
+                        daemon_cmd, status, backoff
+                    );
+                    if backoff > 0 {
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
+                            _ = shutdown_rx.changed() => { self.stop_process().await; return; }
+                        }
+                    }
+                    daemon = self.respawn(&daemon_cmd).await;
+                    backoff = next_backoff(backoff, init_backoff, max_backoff);
+                    health_failures = 0;
+                }
+                // 2. Health probe tick.
+                _ = tick_opt(&mut health_timer) => {
+                    if let Some(h) = &self.health {
+                        if probe_health(h).await {
+                            health_failures = 0;
+                        } else {
+                            health_failures += 1;
+                            tracing::warn!(
+                                "exec daemon '{}' health probe failed ({}/{})",
+                                daemon_cmd, health_failures, h.failure_threshold
+                            );
+                            if health_failures >= h.failure_threshold {
+                                tracing::error!(
+                                    "exec daemon '{}' failed {} health probes; killing + respawning",
+                                    daemon_cmd, h.failure_threshold
+                                );
+                                if let Some(child) = daemon.take() {
+                                    *self.child.lock().await = Some(child);
+                                }
+                                self.kill_process().await;
+                                daemon = self.respawn(&daemon_cmd).await;
+                                health_failures = 0;
+                            }
+                        }
+                    }
+                }
+                // 3. File change (watch) — restart the whole pipeline, as before.
+                event = rx.recv(), if self.glob_exec.is_some() => {
+                    if let Some(event) = event
+                        && self.should_restart(&event)
+                    {
+                        tracing::info!(
+                            "File change detected {} → restarting pipeline",
+                            event
+                                .paths
+                                .iter()
+                                .map(|p| {
+                                    p.strip_prefix(cwd)
+                                        .map(|s| s.to_string_lossy().to_string())
+                                        .unwrap_or_else(|_| p.to_string_lossy().to_string())
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                                .purple()
+                        );
+                        if let Some(child) = daemon.take() {
+                            *self.child.lock().await = Some(child);
+                        }
+                        self.kill_process().await;
+                        if let Err(e) = self.run_pipeline().await {
+                            tracing::error!("pipeline restart failed: {e}");
+                        }
+                        daemon = self.child.lock().await.take();
+                        backoff = init_backoff;
+                        health_failures = 0;
+                    }
+                }
+                // 4. Shutdown.
+                _ = shutdown_rx.changed() => {
+                    if let Some(child) = daemon.take() {
+                        *self.child.lock().await = Some(child);
+                    }
+                    self.stop_process().await;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Respawn the daemon command. Returns the new child, or None on spawn
+    /// failure (loudly logged — supervision keeps running; a configured health
+    /// probe will retry it on the next interval).
+    async fn respawn(&self, command: &str) -> Option<Child> {
+        match self.spawn_single(command) {
+            Ok(child) => {
+                tracing::info!("exec daemon respawned: {}", command.purple());
+                Some(child)
+            }
+            Err(e) => {
+                tracing::error!("failed to respawn exec daemon '{}': {e}", command);
+                None
+            }
+        }
     }
 
     async fn run_pipeline(&self) -> Result<()> {
@@ -325,6 +505,49 @@ impl Exec {
     }
 }
 
+/// Await the child's exit when present; otherwise never resolve, so the
+/// `select!` arm is effectively disabled while no daemon is live.
+async fn wait_opt(daemon: &mut Option<Child>) -> Option<std::process::ExitStatus> {
+    match daemon {
+        Some(child) => child.wait().await.ok(),
+        None => std::future::pending().await,
+    }
+}
+
+/// Tick the interval when present; otherwise never resolve.
+async fn tick_opt(timer: &mut Option<tokio::time::Interval>) {
+    match timer {
+        Some(iv) => {
+            iv.tick().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Next exponential backoff: double the current delay, clamped to
+/// `max_backoff` (0 = no cap). A zero current value falls back to `initial`
+/// so a `backoff_secs: 0` config keeps respawning promptly.
+fn next_backoff(current: u64, initial: u64, max: u64) -> u64 {
+    let base = if current == 0 { initial } else { current };
+    let doubled = base.saturating_mul(2);
+    if max == 0 { doubled } else { doubled.min(max) }
+}
+
+/// Liveness probe: `command` (exit 0 = healthy) takes precedence over `url`
+/// (HTTP 2xx = healthy). No probe configured → considered healthy.
+async fn probe_health(health: &HealthCheck) -> bool {
+    let budget = Duration::from_secs(health.timeout_secs.max(1));
+    if let Some(cmd) = &health.command {
+        let fut = Command::new("sh").arg("-c").arg(cmd).status();
+        return matches!(timeout(budget, fut).await, Ok(Ok(status)) if status.success());
+    }
+    if let Some(url) = &health.url {
+        let fut = reqwest::get(url.as_str());
+        return matches!(timeout(budget, fut).await, Ok(Ok(resp)) if resp.status().is_success());
+    }
+    true
+}
+
 #[cfg(test)]
 #[cfg(not(windows))]
 mod tests {
@@ -345,6 +568,7 @@ mod tests {
         let exec = Exec::new(ExecConfig {
             watch: None,
             exec: vec!["sleep 300 & sleep 300 & wait".to_string()],
+            ..Default::default()
         });
 
         // Spawn the process (sh -c "sleep 300 & sleep 300 & wait")
@@ -385,6 +609,7 @@ mod tests {
         let exec = Exec::new(ExecConfig {
             watch: None,
             exec: vec!["sleep 300 & sleep 300 & wait".to_string()],
+            ..Default::default()
         });
 
         let child = exec.spawn_single(&exec.exec[0]).unwrap();
@@ -420,6 +645,7 @@ mod tests {
         let exec = Exec::new(ExecConfig {
             watch: None,
             exec: vec!["trap '' TERM; sleep 300".to_string()],
+            ..Default::default()
         });
 
         let child = exec.spawn_single(&exec.exec[0]).unwrap();
@@ -449,6 +675,7 @@ mod tests {
         let exec = Exec::new(ExecConfig {
             watch: None,
             exec: vec!["sleep 300".to_string()],
+            ..Default::default()
         });
 
         let child = exec.spawn_single(&exec.exec[0]).unwrap();
@@ -462,6 +689,126 @@ mod tests {
         exec.shutdown().await;
     }
 
+    /// restart.on_crash respawns the long-lived command when it exits. The
+    /// daemon appends a line on each spawn and exits immediately; after a brief
+    /// window the marker must show multiple spawns.
+    #[tokio::test]
+    async fn restart_on_crash_respawns_the_daemon() {
+        let dir = temp_repo_dir("shell-exec-respawn");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let marker = dir.join("spawns.log");
+
+        let exec = Exec::new(ExecConfig {
+            watch: None,
+            exec: vec![format!("echo x >> {}; exit 1", marker.display())],
+            restart: Some(RestartPolicy {
+                on_crash: true,
+                backoff_secs: 0,
+                max_backoff_secs: 0,
+            }),
+            health: None,
+        });
+
+        let runner = tokio::spawn({
+            let exec = exec.clone();
+            async move { exec.run().await }
+        });
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        exec.shutdown().await;
+        let _ = runner.await.expect("join run task");
+
+        let spawns = fs::read_to_string(&marker)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert!(
+            spawns >= 2,
+            "daemon should have respawned, saw {spawns} spawn(s)"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// Back-compat: with NO restart/health, the long-lived command is spawned
+    /// exactly once and never respawned (today's behavior, byte-identical).
+    #[tokio::test]
+    async fn without_restart_daemon_is_spawned_once() {
+        let dir = temp_repo_dir("shell-exec-norestart");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let marker = dir.join("spawns.log");
+
+        let exec = Exec::new(ExecConfig {
+            watch: None,
+            exec: vec![format!("echo x >> {}", marker.display())],
+            ..Default::default()
+        });
+
+        let runner = tokio::spawn({
+            let exec = exec.clone();
+            async move { exec.run().await }
+        });
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        exec.shutdown().await;
+        let _ = runner.await.expect("join run task");
+
+        let spawns = fs::read_to_string(&marker)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(
+            spawns, 1,
+            "without restart the daemon must spawn exactly once, saw {spawns}"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// A failing health probe kills and respawns the daemon after the failure
+    /// threshold. The daemon stays up (sleep) and appends on each spawn; an
+    /// always-failing `command` probe must force at least one respawn.
+    #[tokio::test]
+    async fn health_probe_failure_kills_and_respawns() {
+        let dir = temp_repo_dir("shell-exec-health");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let marker = dir.join("spawns.log");
+
+        let exec = Exec::new(ExecConfig {
+            watch: None,
+            exec: vec![format!("echo x >> {}; sleep 300", marker.display())],
+            restart: None,
+            health: Some(HealthCheck {
+                url: None,
+                command: Some("false".to_string()),
+                interval_secs: 1,
+                timeout_secs: 1,
+                failure_threshold: 1,
+            }),
+        });
+
+        let runner = tokio::spawn({
+            let exec = exec.clone();
+            async move { exec.run().await }
+        });
+
+        // Initial tick is consumed; ~1s later the first probe fails → respawn.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        exec.shutdown().await;
+        let _ = runner.await.expect("join run task");
+
+        let spawns = fs::read_to_string(&marker)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert!(
+            spawns >= 2,
+            "failing health probe should have respawned the daemon, saw {spawns} spawn(s)"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn should_restart_uses_notify_event_kind_and_watch_patterns() {
         let root = temp_repo_dir("shell-exec-should-restart");
@@ -473,6 +820,7 @@ mod tests {
                 root.file_name().expect("temp dir name").to_string_lossy()
             )]),
             exec: vec![],
+            ..Default::default()
         });
 
         let matching = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)))
@@ -495,6 +843,7 @@ mod tests {
         let exec = Exec::new(ExecConfig {
             watch: None,
             exec: vec![],
+            ..Default::default()
         });
 
         let runner = tokio::spawn({
@@ -521,6 +870,7 @@ mod tests {
                 "sleep 30".to_string(),
                 format!("printf done > {}", output_file.display()),
             ],
+            ..Default::default()
         });
 
         let pipeline = tokio::spawn({
@@ -553,6 +903,7 @@ mod tests {
                 "false".to_string(),
                 format!("printf done > {}", output_file.display()),
             ],
+            ..Default::default()
         });
 
         exec.run_pipeline().await.expect("run pipeline");
@@ -580,6 +931,7 @@ mod tests {
         let exec = Exec::new(ExecConfig {
             watch: Some(vec![pattern]),
             exec: vec![format!("printf x >> {}; sleep 5", output_file.display())],
+            ..Default::default()
         });
 
         let runner = tokio::spawn({

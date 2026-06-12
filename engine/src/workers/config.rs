@@ -924,7 +924,11 @@ mod tests {
             name: "iii-exec".to_string(),
             ..Default::default()
         };
-        assert_eq!(legacy.worker_type(), "iii-exec", "no type → factory is the name");
+        assert_eq!(
+            legacy.worker_type(),
+            "iii-exec",
+            "no type → factory is the name"
+        );
 
         let instanced = WorkerEntry {
             name: "iii-http#1".to_string(),
