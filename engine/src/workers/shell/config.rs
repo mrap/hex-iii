@@ -93,4 +93,48 @@ mod tests {
         let config: ExecConfig = serde_json::from_value(json).unwrap();
         assert!(config.watch.is_none());
     }
+
+    /// The full supervised-daemon config (as written in engine-workers.yaml's
+    /// `config:` block) deserializes into ExecConfig with restart + health
+    /// populated — the passthrough the worker relies on.
+    #[test]
+    fn exec_config_parses_restart_and_health() {
+        let json = json!({
+            "exec": ["pkill x", "headroom proxy"],
+            "restart": { "on_crash": true, "backoff_secs": 5, "max_backoff_secs": 60 },
+            "health": {
+                "url": "http://127.0.0.1:8787/health",
+                "interval_secs": 30,
+                "timeout_secs": 5,
+                "failure_threshold": 3
+            }
+        });
+        let config: ExecConfig = serde_json::from_value(json).unwrap();
+
+        let restart = config.restart.expect("restart parsed");
+        assert!(restart.on_crash);
+        assert_eq!(restart.backoff_secs, 5);
+        assert_eq!(restart.max_backoff_secs, 60);
+
+        let health = config.health.expect("health parsed");
+        assert_eq!(health.url.as_deref(), Some("http://127.0.0.1:8787/health"));
+        assert_eq!(health.command, None);
+        assert_eq!(health.interval_secs, 30);
+        assert_eq!(health.failure_threshold, 3);
+    }
+
+    /// Omitted restart/health stay None, and a partial restart block fills the
+    /// documented defaults (backoff 5/60).
+    #[test]
+    fn exec_config_restart_health_defaults() {
+        let bare: ExecConfig = serde_json::from_value(json!({ "exec": ["x"] })).unwrap();
+        assert!(bare.restart.is_none() && bare.health.is_none());
+
+        let partial: ExecConfig =
+            serde_json::from_value(json!({ "exec": ["x"], "restart": { "on_crash": true } }))
+                .unwrap();
+        let restart = partial.restart.unwrap();
+        assert_eq!(restart.backoff_secs, 5);
+        assert_eq!(restart.max_backoff_secs, 60);
+    }
 }

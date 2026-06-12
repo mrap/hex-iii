@@ -941,6 +941,27 @@ mod tests {
         );
     }
 
+    /// The `type` field deserializes from YAML/JSON (serde rename) and drives
+    /// factory resolution while `name` stays the semantic identity — the shape
+    /// an instance writes in engine-workers.yaml to host a named iii-exec daemon.
+    #[test]
+    fn worker_entry_deserializes_type_for_named_builtin() {
+        let entry: WorkerEntry = serde_json::from_value(serde_json::json!({
+            "name": "headroom-proxy",
+            "type": "iii-exec",
+            "config": { "exec": ["headroom proxy"] }
+        }))
+        .expect("entry parses");
+        assert_eq!(entry.name, "headroom-proxy");
+        assert_eq!(entry.worker_type(), "iii-exec");
+
+        // No `type` → legacy: factory is the name.
+        let legacy: WorkerEntry =
+            serde_json::from_value(serde_json::json!({ "name": "iii-exec" })).unwrap();
+        assert_eq!(legacy.kind, None);
+        assert_eq!(legacy.worker_type(), "iii-exec");
+    }
+
     fn restore_env_var(name: &str, value: Option<std::ffi::OsString>) {
         unsafe {
             match value {
