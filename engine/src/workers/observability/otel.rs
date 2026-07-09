@@ -621,7 +621,7 @@ impl SpanExporter for InMemorySpanExporter {
         async { Ok(()) }
     }
 
-    fn shutdown_with_timeout(&mut self, _timeout: std::time::Duration) -> OTelSdkResult {
+    fn shutdown_with_timeout(&self, _timeout: std::time::Duration) -> OTelSdkResult {
         // Nothing to clean up for in-memory storage
         Ok(())
     }
@@ -666,7 +666,7 @@ impl SpanExporter for TeeSpanExporter {
         self.otlp_exporter.export(batch)
     }
 
-    fn shutdown_with_timeout(&mut self, timeout: std::time::Duration) -> OTelSdkResult {
+    fn shutdown_with_timeout(&self, timeout: std::time::Duration) -> OTelSdkResult {
         self.otlp_exporter.shutdown_with_timeout(timeout)
     }
 }

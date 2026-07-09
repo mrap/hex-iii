@@ -5,14 +5,14 @@
 // See LICENSE and PATENTS files for details.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use tracing::{
-    Event, Level, Subscriber,
+    Dispatch, Event, Level, Subscriber,
+    dispatcher::WeakDispatch,
     field::{Field, Visit},
 };
-use tracing_opentelemetry::OtelData;
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
@@ -104,6 +104,9 @@ fn level_to_severity_number(level: &Level) -> i32 {
 pub struct OtelLogsLayer {
     storage: Arc<InMemoryLogStorage>,
     service_name: String,
+    /// Weak handle to the registered dispatch, used to look up OTel span context via
+    /// `tracing_opentelemetry::get_otel_context`. Set in `on_register_dispatch`.
+    dispatch: Arc<OnceLock<WeakDispatch>>,
 }
 
 impl OtelLogsLayer {
@@ -112,6 +115,7 @@ impl OtelLogsLayer {
         Self {
             storage,
             service_name,
+            dispatch: Arc::new(OnceLock::new()),
         }
     }
 }
@@ -120,6 +124,10 @@ impl<S> Layer<S> for OtelLogsLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
+    fn on_register_dispatch(&self, subscriber: &Dispatch) {
+        let _ = self.dispatch.set(subscriber.downgrade());
+    }
+
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         let metadata = event.metadata();
 
@@ -133,12 +141,24 @@ where
         // We need to get the span's own trace_id and span_id from the builder,
         // not from parent_cx which would be empty for root spans
         let (trace_id, span_id) = if let Some(span) = ctx.event_span(event) {
-            let extensions = span.extensions();
-            if let Some(otel_data) = extensions.get::<OtelData>() {
-                // Get trace_id and span_id from the OtelData (the current span's IDs)
-                let trace_id = otel_data.trace_id().map(|id| format!("{:032x}", id));
-                let span_id = otel_data.span_id().map(|id| format!("{:016x}", id));
-                (trace_id, span_id)
+            let otel_cx = self
+                .dispatch
+                .get()
+                .and_then(|weak| weak.upgrade())
+                .and_then(|dispatch| tracing_opentelemetry::get_otel_context(&span.id(), &dispatch));
+
+            if let Some(otel_cx) = otel_cx {
+                use opentelemetry::trace::TraceContextExt;
+                let span_ref = otel_cx.span();
+                let span_context = span_ref.span_context();
+                if span_context.is_valid() {
+                    (
+                        Some(span_context.trace_id().to_string()),
+                        Some(span_context.span_id().to_string()),
+                    )
+                } else {
+                    (None, None)
+                }
             } else {
                 (None, None)
             }
