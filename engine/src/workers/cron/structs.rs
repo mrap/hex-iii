@@ -14,6 +14,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use colored::Colorize;
 use cron::Schedule;
 use tokio::{task::JoinHandle, time::sleep};
@@ -32,6 +33,32 @@ pub trait CronSchedulerAdapter: Send + Sync + 'static {
     async fn release_lock(&self, job_id: &str);
 }
 
+/// Wall-clock and sleep source for the cron loop.
+///
+/// Injected (instead of calling `Utc::now()` / `tokio::time::sleep` inline) so
+/// tests can drive the scheduler deterministically and reproduce the clock
+/// skew described on [`next_fire`].
+#[async_trait]
+pub(crate) trait CronClock: Send + Sync + 'static {
+    fn now(&self) -> DateTime<Utc>;
+    async fn sleep(&self, duration: Duration);
+}
+
+/// Production clock: `chrono::Utc::now()` for the wall clock, `tokio::time::sleep`
+/// (monotonic clock) for waiting.
+pub(crate) struct SystemClock;
+
+#[async_trait]
+impl CronClock for SystemClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+
+    async fn sleep(&self, duration: Duration) {
+        sleep(duration).await
+    }
+}
+
 pub(crate) struct CronJobInfo {
     #[allow(dead_code)]
     pub id: String,
@@ -47,6 +74,7 @@ pub struct CronAdapter {
     adapter: Arc<dyn CronSchedulerAdapter>,
     jobs: Arc<tokio::sync::RwLock<HashMap<String, CronJobInfo>>>,
     engine: Arc<Engine>,
+    clock: Arc<dyn CronClock>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     shutdown_called: AtomicBool,
@@ -54,11 +82,20 @@ pub struct CronAdapter {
 
 impl CronAdapter {
     pub fn new(scheduler: Arc<dyn CronSchedulerAdapter>, engine: Arc<Engine>) -> Self {
+        Self::new_with_clock(scheduler, engine, Arc::new(SystemClock))
+    }
+
+    pub(crate) fn new_with_clock(
+        scheduler: Arc<dyn CronSchedulerAdapter>,
+        engine: Arc<Engine>,
+        clock: Arc<dyn CronClock>,
+    ) -> Self {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         Self {
             adapter: scheduler,
             jobs: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             engine,
+            clock,
             shutdown_tx,
             shutdown_rx,
             shutdown_called: AtomicBool::new(false),
@@ -82,6 +119,7 @@ impl CronAdapter {
     ) -> JoinHandle<()> {
         let scheduler = Arc::clone(&self.adapter);
         let engine = Arc::clone(&self.engine);
+        let clock = Arc::clone(&self.clock);
         let job_id = id.clone();
         let function_id = function_id.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
@@ -91,11 +129,8 @@ impl CronAdapter {
 
             loop {
                 // Calculate time until next execution
-                let now = chrono::Utc::now();
-                let next: chrono::DateTime<chrono::Utc> = match schedule
-                    .upcoming(chrono::Utc)
-                    .next()
-                {
+                let now = clock.now();
+                let next: DateTime<Utc> = match schedule.after(&now).next() {
                     Some(next) => next,
                     None => {
                         tracing::warn!(job_id = %job_id, "No upcoming schedule found for cron job");
@@ -114,7 +149,7 @@ impl CronAdapter {
 
                 // Wait until the next scheduled time, or shutdown signal
                 tokio::select! {
-                    _ = sleep(duration_until_next) => {}
+                    _ = clock.sleep(duration_until_next) => {}
                     _ = shutdown_rx.changed() => {
                         tracing::info!(job_id = %job_id, "Cron job received shutdown signal");
                         break;
@@ -152,7 +187,7 @@ impl CronAdapter {
                             "trigger": "cron",
                             "job_id": job_id,
                             "scheduled_time": next.to_rfc3339(),
-                            "actual_time": chrono::Utc::now().to_rfc3339(),
+                            "actual_time": clock.now().to_rfc3339(),
                         });
 
                         if let Some(ref condition_id) = condition_function_id {
