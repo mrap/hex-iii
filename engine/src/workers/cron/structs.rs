@@ -59,6 +59,27 @@ impl CronClock for SystemClock {
     }
 }
 
+/// The next slot to fire: strictly after `now` AND strictly after the slot
+/// fired last, so a slot can never fire twice.
+///
+/// Why `last_fired` matters (hex incident, 2026-08-28 to 2026-09-23): the job
+/// loop sleeps on the monotonic clock but schedules on the wall clock. Over a
+/// 24h sleep the two drifted ~250ms, so the loop woke at 04:59:59.78 for a
+/// 05:00:00 slot. Computing "next" from that pre-boundary `now` returned the
+/// same 05:00:00 slot, and every daily job whose handler finished before the
+/// wall clock reached 05:00:00 fired twice (04:59:59.8 and 05:00:00.0).
+pub(crate) fn next_fire(
+    schedule: &Schedule,
+    now: DateTime<Utc>,
+    last_fired: Option<DateTime<Utc>>,
+) -> Option<DateTime<Utc>> {
+    let anchor = match last_fired {
+        Some(last) if last > now => last,
+        _ => now,
+    };
+    schedule.after(&anchor).next()
+}
+
 pub(crate) struct CronJobInfo {
     #[allow(dead_code)]
     pub id: String,
@@ -127,10 +148,14 @@ impl CronAdapter {
         tokio::spawn(async move {
             tracing::debug!(job_id = %job_id, function_id = %function_id, "Starting cron job loop");
 
-            loop {
+            // The slot fired most recently. `next_fire` anchors on it so the
+            // same slot is never scheduled twice, whatever the wall clock says.
+            let mut last_fired: Option<DateTime<Utc>> = None;
+
+            'job: loop {
                 // Calculate time until next execution
                 let now = clock.now();
-                let next: DateTime<Utc> = match schedule.after(&now).next() {
+                let next: DateTime<Utc> = match next_fire(&schedule, now, last_fired) {
                     Some(next) => next,
                     None => {
                         tracing::warn!(job_id = %job_id, "No upcoming schedule found for cron job");
@@ -138,21 +163,38 @@ impl CronAdapter {
                     }
                 };
 
-                let duration_until_next = (next - now).to_std().unwrap_or(Duration::ZERO);
-
                 tracing::debug!(
                     job_id = %job_id,
                     next_run = %next,
-                    duration_secs = duration_until_next.as_secs(),
+                    duration_secs = (next - now).num_seconds(),
                     "Waiting for next cron execution"
                 );
 
-                // Wait until the next scheduled time, or shutdown signal
-                tokio::select! {
-                    _ = clock.sleep(duration_until_next) => {}
-                    _ = shutdown_rx.changed() => {
-                        tracing::info!(job_id = %job_id, "Cron job received shutdown signal");
+                // Wait until the WALL clock reaches `next`, or shutdown. The
+                // sleep runs on the monotonic clock and can return before the
+                // wall clock gets there (observed: ~250ms over a 24h sleep), so
+                // re-check after every wake and sleep the remainder instead of
+                // firing early.
+                loop {
+                    let now = clock.now();
+                    if now >= next {
                         break;
+                    }
+                    let remaining = (next - now).to_std().unwrap_or(Duration::ZERO);
+                    tokio::select! {
+                        _ = clock.sleep(remaining) => {}
+                        _ = shutdown_rx.changed() => {
+                            tracing::info!(job_id = %job_id, "Cron job received shutdown signal");
+                            break 'job;
+                        }
+                    }
+                    if clock.now() < next {
+                        tracing::debug!(
+                            job_id = %job_id,
+                            next_run = %next,
+                            early_by_ms = (next - clock.now()).num_milliseconds(),
+                            "Sleep returned before the wall clock reached the slot; sleeping the remainder"
+                        );
                     }
                 }
 
@@ -161,6 +203,8 @@ impl CronAdapter {
                     tracing::info!(job_id = %job_id, "Cron job shutting down");
                     break;
                 }
+
+                last_fired = Some(next);
 
                 // Try to acquire the distributed lock
                 if scheduler.try_acquire_lock(&job_id).await {
@@ -506,6 +550,150 @@ mod tests {
         assert!(missing.to_string().contains("not found"));
 
         adapter.shutdown().await;
+    }
+
+    /// Incident numbers: the loop woke at 04:59:59.780 for the 05:00:00 slot,
+    /// fired, and recomputed from that pre-boundary `now`. With nothing fired
+    /// yet the slot is today's; once that slot has fired, the same pre-boundary
+    /// `now` must yield tomorrow's slot, never today's again.
+    #[test]
+    fn next_fire_never_returns_the_slot_just_fired() {
+        use chrono::TimeZone;
+
+        let schedule: Schedule = "0 0 5 * * * *".parse().unwrap();
+        let slot = Utc.with_ymd_and_hms(2026, 9, 23, 5, 0, 0).unwrap();
+        let early_wake = slot - chrono::Duration::milliseconds(220);
+
+        assert_eq!(next_fire(&schedule, early_wake, None), Some(slot));
+        assert_eq!(
+            next_fire(&schedule, early_wake, Some(slot)),
+            Some(slot + chrono::Duration::days(1))
+        );
+        // A normal (late) wake still moves on to the next slot.
+        assert_eq!(
+            next_fire(
+                &schedule,
+                slot + chrono::Duration::milliseconds(9),
+                Some(slot)
+            ),
+            Some(slot + chrono::Duration::days(1))
+        );
+        // Wall clock jumped ahead past last_fired: anchor on now.
+        let later = slot + chrono::Duration::hours(30);
+        assert_eq!(
+            next_fire(&schedule, later, Some(slot)),
+            Some(slot + chrono::Duration::days(2))
+        );
+    }
+
+    /// Wall clock that gains slightly less than each monotonic sleep, so a
+    /// sleep returns BEFORE the wall clock reaches the target. This is the
+    /// skew the hex harness sees on macOS: `tokio::time::sleep` runs on the
+    /// monotonic clock, `Utc::now()` is NTP-disciplined, and over a 24h sleep
+    /// they diverge by ~250ms.
+    struct SkewedClock {
+        now: std::sync::Mutex<DateTime<Utc>>,
+        slow_ppm: f64,
+    }
+
+    #[async_trait]
+    impl CronClock for SkewedClock {
+        fn now(&self) -> DateTime<Utc> {
+            *self.now.lock().unwrap()
+        }
+
+        async fn sleep(&self, duration: Duration) {
+            // Paused tokio time auto-advances this instantly in tests.
+            tokio::time::sleep(duration).await;
+            let advance = duration.mul_f64(1.0 - self.slow_ppm * 1e-6);
+            let mut now = self.now.lock().unwrap();
+            *now += chrono::Duration::from_std(advance).expect("advance fits");
+        }
+    }
+
+    /// Incident: hex-applier::daily-run-0500 (`0 0 5 * * * *`) landed two
+    /// telemetry rows on 19 of 23 days, e.g. 2026-09-23T04:59:59.815 and
+    /// 2026-09-23T05:00:00.183, with the same for every other daily cron whose
+    /// handler finishes in under a second. The loop woke ~220ms before the wall
+    /// clock reached 05:00:00, fired, recomputed "next" from that pre-boundary
+    /// `now`, got 05:00:00 back again and fired it a second time.
+    ///
+    /// With a 3ppm-slow wall clock a 24h sleep wakes 259ms early. Over three
+    /// mock days the job must fire exactly three times, each at or after its
+    /// slot, never the same slot twice.
+    #[tokio::test(start_paused = true)]
+    async fn daily_job_fires_each_slot_once_when_sleep_wakes_before_wall_clock() {
+        use chrono::TimeZone;
+
+        let engine = test_engine();
+        let fires: Arc<std::sync::Mutex<Vec<(String, String)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let fires_clone = fires.clone();
+        engine.register_function_handler(
+            RegisterFunctionRequest {
+                function_id: "cron.handler.daily".to_string(),
+                description: None,
+                request_format: None,
+                response_format: None,
+                metadata: None,
+            },
+            Handler::new(move |input: Value| {
+                let fires_clone = fires_clone.clone();
+                async move {
+                    fires_clone.lock().unwrap().push((
+                        input["scheduled_time"].as_str().unwrap().to_string(),
+                        input["actual_time"].as_str().unwrap().to_string(),
+                    ));
+                    FunctionResult::Success(Some(serde_json::json!({ "ok": true })))
+                }
+            }),
+        );
+
+        let start = Utc.with_ymd_and_hms(2026, 9, 22, 5, 0, 0).unwrap()
+            + chrono::Duration::milliseconds(500);
+        let clock = Arc::new(SkewedClock {
+            now: std::sync::Mutex::new(start),
+            slow_ppm: 3.0,
+        });
+        let adapter = CronAdapter::new_with_clock(
+            Arc::new(CountingSchedulerAdapter {
+                acquire_calls: Arc::new(AtomicUsize::new(0)),
+                release_calls: Arc::new(AtomicUsize::new(0)),
+                allow_lock: true,
+            }),
+            engine,
+            clock.clone(),
+        );
+
+        adapter
+            .register("daily-0500", "0 0 5 * * * *", "cron.handler.daily", None)
+            .await
+            .expect("register daily cron job");
+
+        // Three slots: 09-23, 09-24, 09-25 at 05:00. Paused time auto-advances
+        // through the job's 24h sleeps before this one completes.
+        tokio::time::sleep(Duration::from_secs(3 * 86_400 + 3_600)).await;
+        adapter.shutdown().await;
+
+        let fires = fires.lock().unwrap().clone();
+        let scheduled: Vec<&str> = fires.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(
+            scheduled,
+            vec![
+                "2026-09-23T05:00:00+00:00",
+                "2026-09-24T05:00:00+00:00",
+                "2026-09-25T05:00:00+00:00",
+            ],
+            "each slot fires exactly once; got {fires:?}"
+        );
+        for (scheduled, actual) in &fires {
+            let s = DateTime::parse_from_rfc3339(scheduled).unwrap();
+            let a = DateTime::parse_from_rfc3339(actual).unwrap();
+            assert!(
+                a >= s,
+                "fired before the wall clock reached the slot: scheduled {scheduled} actual {actual}"
+            );
+        }
     }
 
     #[tokio::test]
