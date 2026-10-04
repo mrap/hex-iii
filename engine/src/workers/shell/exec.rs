@@ -193,6 +193,9 @@ impl Exec {
             .map(|r| (r.backoff_secs, r.max_backoff_secs))
             .unwrap_or((0, 0));
         let mut backoff = init_backoff;
+        // When the current daemon process started; a long healthy run resets the
+        // crash backoff (see plan_restart).
+        let mut started_at = std::time::Instant::now();
 
         let mut health_timer = self.health.as_ref().map(|h| {
             let mut iv = tokio::time::interval(Duration::from_secs(h.interval_secs.max(1)));
@@ -223,20 +226,28 @@ impl Exec {
                             );
                             continue;
                         }
-                        tracing::error!(
-                            "exec daemon '{}' exited ({:?}); respawning after {}s backoff",
-                            daemon_cmd, status, backoff
+                        let plan = plan_restart(
+                            backoff,
+                            init_backoff,
+                            max_backoff,
+                            started_at.elapsed(),
+                            &status,
                         );
-                        if backoff > 0 {
+                        tracing::error!(
+                            "exec daemon '{}' exited ({:?}) after {}s up; respawning after {}s backoff",
+                            daemon_cmd, status, started_at.elapsed().as_secs(), plan.wait_secs
+                        );
+                        if plan.wait_secs > 0 {
                             tokio::select! {
-                                _ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
+                                _ = tokio::time::sleep(Duration::from_secs(plan.wait_secs)) => {}
                                 _ = shutdown_rx.changed() => { self.stop_process().await; return; }
                             }
                         }
                         if let Some(child) = self.respawn(&daemon_cmd).await {
                             *self.child.lock().await = Some(child);
                         }
-                        backoff = next_backoff(backoff, init_backoff, max_backoff);
+                        started_at = std::time::Instant::now();
+                        backoff = plan.next_backoff;
                         health_failures = 0;
                     }
                 }
@@ -260,6 +271,7 @@ impl Exec {
                                 if let Some(child) = self.respawn(&daemon_cmd).await {
                                     *self.child.lock().await = Some(child);
                                 }
+                                started_at = std::time::Instant::now();
                                 health_failures = 0;
                             }
                         }
@@ -289,6 +301,7 @@ impl Exec {
                             tracing::error!("pipeline restart failed: {e}");
                         }
                         backoff = init_backoff;
+                        started_at = std::time::Instant::now();
                         health_failures = 0;
                     }
                 }
@@ -550,6 +563,63 @@ fn next_backoff(current: u64, initial: u64, max: u64) -> u64 {
     if max == 0 { doubled } else { doubled.min(max) }
 }
 
+/// What the supervisor does after the daemon exits: how long to wait before the
+/// respawn, and the delay to carry into the next exit.
+#[derive(Debug, PartialEq, Eq)]
+struct RestartPlan {
+    wait_secs: u64,
+    next_backoff: u64,
+}
+
+/// A daemon must stay up at least this long before its next exit counts as a
+/// fresh crash. At least 10 s and at least the backoff cap, so it has to
+/// outlive its own worst wait.
+fn healthy_uptime(initial: u64, max: u64) -> Duration {
+    Duration::from_secs(10.max(initial).max(max))
+}
+
+/// True when the daemon was stopped by SIGTERM (a deploy or `pkill`), either
+/// killed by the signal or as a shell that reports exit 143.
+fn is_sigterm_exit(status: &std::process::ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal() == Some(15) || status.code() == Some(143)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        false
+    }
+}
+
+/// Decide the respawn wait. A SIGTERM exit is a restart: wait the initial delay
+/// and do not grow the streak. A crash after a long healthy run also starts
+/// over at the initial delay. A quick crash keeps the exponential growth.
+fn plan_restart(
+    backoff: u64,
+    initial: u64,
+    max: u64,
+    uptime: Duration,
+    status: &std::process::ExitStatus,
+) -> RestartPlan {
+    if is_sigterm_exit(status) {
+        return RestartPlan {
+            wait_secs: initial,
+            next_backoff: initial,
+        };
+    }
+    let wait_secs = if uptime >= healthy_uptime(initial, max) {
+        initial
+    } else {
+        backoff
+    };
+    RestartPlan {
+        wait_secs,
+        next_backoff: next_backoff(wait_secs, initial, max),
+    }
+}
+
 /// Liveness probe: `command` (exit 0 = healthy) takes precedence over `url`
 /// (HTTP 2xx = healthy). No probe configured → considered healthy.
 async fn probe_health(health: &HealthCheck) -> bool {
@@ -746,6 +816,71 @@ mod tests {
         );
 
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    fn exit_by_code(code: i32) -> std::process::ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(code << 8)
+    }
+
+    #[cfg(unix)]
+    fn exit_by_signal(sig: i32) -> std::process::ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(sig)
+    }
+
+    /// Incident backoff1003: a daemon that ran healthy for hours and then got
+    /// SIGTERM on a deploy waited the full 60 s cap, because the delay only ever
+    /// doubled. A long healthy run must reset the delay to the initial value.
+    #[cfg(unix)]
+    #[test]
+    fn long_healthy_uptime_resets_backoff_to_initial() {
+        let plan = plan_restart(60, 5, 60, Duration::from_secs(3600), &exit_by_code(1));
+        assert_eq!(plan.wait_secs, 5);
+        assert_eq!(plan.next_backoff, 10);
+    }
+
+    /// A daemon that dies right after spawn keeps the exponential growth.
+    #[cfg(unix)]
+    #[test]
+    fn quick_crash_keeps_growing_backoff() {
+        let plan = plan_restart(20, 5, 60, Duration::from_millis(300), &exit_by_code(1));
+        assert_eq!(plan.wait_secs, 20);
+        assert_eq!(plan.next_backoff, 40);
+    }
+
+    /// A clean SIGTERM (a deploy), by signal or as shell exit 143, restarts at
+    /// the initial delay and never counts toward the crash streak.
+    #[cfg(unix)]
+    #[test]
+    fn sigterm_exit_is_a_restart_not_a_crash() {
+        for status in [exit_by_signal(15), exit_by_code(143)] {
+            let plan = plan_restart(40, 5, 60, Duration::from_millis(300), &status);
+            assert_eq!(plan.wait_secs, 5, "{status:?}");
+            assert_eq!(plan.next_backoff, 5, "{status:?}");
+        }
+    }
+
+    /// SIGKILL and ordinary non-zero exits are still crashes.
+    #[cfg(unix)]
+    #[test]
+    fn sigkill_and_nonzero_exit_are_still_crashes() {
+        for status in [exit_by_signal(9), exit_by_code(1), exit_by_code(137)] {
+            let plan = plan_restart(10, 5, 60, Duration::from_secs(1), &status);
+            assert_eq!(plan.wait_secs, 10, "{status:?}");
+            assert_eq!(plan.next_backoff, 20, "{status:?}");
+        }
+    }
+
+    /// The healthy-uptime bar is at least 10 s and at least the backoff cap, so
+    /// a daemon must outlive its own worst wait before it counts as healthy.
+    #[test]
+    fn healthy_uptime_bar_scales_with_the_cap() {
+        assert_eq!(healthy_uptime(5, 60), Duration::from_secs(60));
+        assert_eq!(healthy_uptime(1, 2), Duration::from_secs(10));
+        assert_eq!(healthy_uptime(0, 0), Duration::from_secs(10));
+        assert_eq!(healthy_uptime(90, 0), Duration::from_secs(90));
     }
 
     /// Back-compat: with NO restart/health, the long-lived command is spawned
