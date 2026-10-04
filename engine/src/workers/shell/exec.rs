@@ -572,10 +572,10 @@ struct RestartPlan {
 }
 
 /// A daemon must stay up at least this long before its next exit counts as a
-/// fresh crash. At least 10 s and at least the backoff cap, so it has to
-/// outlive its own worst wait.
-fn healthy_uptime(initial: u64, max: u64) -> Duration {
-    Duration::from_secs(10.max(initial).max(max))
+/// fresh crash. At least 10 s, the backoff cap, and the current wait (which
+/// matters when the cap is 0 = uncapped), so it has to outlive its own wait.
+fn healthy_uptime(initial: u64, max: u64, current: u64) -> Duration {
+    Duration::from_secs(10.max(initial).max(max).max(current))
 }
 
 /// True when the daemon was stopped by SIGTERM (a deploy or `pkill`), either
@@ -593,9 +593,9 @@ fn is_sigterm_exit(status: &std::process::ExitStatus) -> bool {
     }
 }
 
-/// Decide the respawn wait. A SIGTERM exit is a restart: wait the initial delay
-/// and do not grow the streak. A crash after a long healthy run also starts
-/// over at the initial delay. A quick crash keeps the exponential growth.
+/// Decide the respawn wait. After a healthy run the streak starts over at the
+/// initial delay, and a SIGTERM exit (a deploy) does not grow it. A quick exit,
+/// SIGTERM or not, keeps the exponential growth so a flapping daemon backs off.
 fn plan_restart(
     backoff: u64,
     initial: u64,
@@ -603,17 +603,14 @@ fn plan_restart(
     uptime: Duration,
     status: &std::process::ExitStatus,
 ) -> RestartPlan {
-    if is_sigterm_exit(status) {
+    let healthy = uptime >= healthy_uptime(initial, max, backoff);
+    if healthy && is_sigterm_exit(status) {
         return RestartPlan {
             wait_secs: initial,
             next_backoff: initial,
         };
     }
-    let wait_secs = if uptime >= healthy_uptime(initial, max) {
-        initial
-    } else {
-        backoff
-    };
+    let wait_secs = if healthy { initial } else { backoff };
     RestartPlan {
         wait_secs,
         next_backoff: next_backoff(wait_secs, initial, max),
@@ -850,16 +847,40 @@ mod tests {
         assert_eq!(plan.next_backoff, 40);
     }
 
-    /// A clean SIGTERM (a deploy), by signal or as shell exit 143, restarts at
-    /// the initial delay and never counts toward the crash streak.
+    /// A SIGTERM after a healthy run (a deploy), by signal or as shell exit 143,
+    /// restarts at the initial delay and does not grow the crash streak.
     #[cfg(unix)]
     #[test]
-    fn sigterm_exit_is_a_restart_not_a_crash() {
+    fn sigterm_after_healthy_run_is_a_restart_not_a_crash() {
         for status in [exit_by_signal(15), exit_by_code(143)] {
-            let plan = plan_restart(40, 5, 60, Duration::from_millis(300), &status);
+            let plan = plan_restart(40, 5, 60, Duration::from_secs(3600), &status);
             assert_eq!(plan.wait_secs, 5, "{status:?}");
             assert_eq!(plan.next_backoff, 5, "{status:?}");
         }
+    }
+
+    /// Codex review: a daemon that keeps exiting 143 right after spawn must not
+    /// dodge the backoff and respawn at the initial delay forever.
+    #[cfg(unix)]
+    #[test]
+    fn quick_repeated_sigterm_exit_still_backs_off() {
+        for status in [exit_by_signal(15), exit_by_code(143)] {
+            let plan = plan_restart(20, 5, 60, Duration::from_millis(300), &status);
+            assert_eq!(plan.wait_secs, 20, "{status:?}");
+            assert_eq!(plan.next_backoff, 40, "{status:?}");
+        }
+    }
+
+    /// Codex review: with no cap, a daemon must outlive the current wait, not
+    /// just 10 s, before the streak resets.
+    #[cfg(unix)]
+    #[test]
+    fn uncapped_backoff_needs_uptime_beyond_the_current_wait() {
+        let crashed_early = plan_restart(300, 5, 0, Duration::from_secs(20), &exit_by_code(1));
+        assert_eq!(crashed_early.wait_secs, 300);
+        assert_eq!(crashed_early.next_backoff, 600);
+        let healthy = plan_restart(300, 5, 0, Duration::from_secs(301), &exit_by_code(1));
+        assert_eq!(healthy.wait_secs, 5);
     }
 
     /// SIGKILL and ordinary non-zero exits are still crashes.
@@ -877,10 +898,11 @@ mod tests {
     /// a daemon must outlive its own worst wait before it counts as healthy.
     #[test]
     fn healthy_uptime_bar_scales_with_the_cap() {
-        assert_eq!(healthy_uptime(5, 60), Duration::from_secs(60));
-        assert_eq!(healthy_uptime(1, 2), Duration::from_secs(10));
-        assert_eq!(healthy_uptime(0, 0), Duration::from_secs(10));
-        assert_eq!(healthy_uptime(90, 0), Duration::from_secs(90));
+        assert_eq!(healthy_uptime(5, 60, 5), Duration::from_secs(60));
+        assert_eq!(healthy_uptime(1, 2, 1), Duration::from_secs(10));
+        assert_eq!(healthy_uptime(0, 0, 0), Duration::from_secs(10));
+        assert_eq!(healthy_uptime(90, 0, 90), Duration::from_secs(90));
+        assert_eq!(healthy_uptime(5, 0, 300), Duration::from_secs(300));
     }
 
     /// Back-compat: with NO restart/health, the long-lived command is spawned
