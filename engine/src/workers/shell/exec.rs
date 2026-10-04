@@ -43,7 +43,13 @@ pub struct Exec {
     shutdown_tx: Arc<tokio::sync::watch::Sender<bool>>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     shutdown_called: Arc<AtomicBool>,
+    /// Minimum uptime (seconds) before an exit counts as a fresh crash. Tests
+    /// shorten it; production keeps HEALTHY_UPTIME_FLOOR_SECS.
+    healthy_floor_secs: u64,
 }
+
+/// Floor for `healthy_uptime`, in seconds.
+const HEALTHY_UPTIME_FLOOR_SECS: u64 = 10;
 
 const MAX_WATCH_EVENTS: usize = 100;
 
@@ -65,6 +71,7 @@ impl Exec {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             shutdown_called: Arc::new(AtomicBool::new(false)),
+            healthy_floor_secs: HEALTHY_UPTIME_FLOOR_SECS,
         }
     }
 
@@ -231,6 +238,7 @@ impl Exec {
                             init_backoff,
                             max_backoff,
                             started_at.elapsed(),
+                            self.healthy_floor_secs,
                             &status,
                         );
                         tracing::error!(
@@ -572,10 +580,10 @@ struct RestartPlan {
 }
 
 /// A daemon must stay up at least this long before its next exit counts as a
-/// fresh crash. At least 10 s, the backoff cap, and the current wait (which
+/// fresh crash. At least `floor` (10 s in production), the backoff cap, and the current wait (which
 /// matters when the cap is 0 = uncapped), so it has to outlive its own wait.
-fn healthy_uptime(initial: u64, max: u64, current: u64) -> Duration {
-    Duration::from_secs(10.max(initial).max(max).max(current))
+fn healthy_uptime(floor: u64, initial: u64, max: u64, current: u64) -> Duration {
+    Duration::from_secs(floor.max(initial).max(max).max(current))
 }
 
 /// True when the daemon was stopped by SIGTERM (a deploy or `pkill`), either
@@ -601,9 +609,10 @@ fn plan_restart(
     initial: u64,
     max: u64,
     uptime: Duration,
+    floor: u64,
     status: &std::process::ExitStatus,
 ) -> RestartPlan {
-    let healthy = uptime >= healthy_uptime(initial, max, backoff);
+    let healthy = uptime >= healthy_uptime(floor, initial, max, backoff);
     if healthy && is_sigterm_exit(status) {
         return RestartPlan {
             wait_secs: initial,
@@ -833,7 +842,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn long_healthy_uptime_resets_backoff_to_initial() {
-        let plan = plan_restart(60, 5, 60, Duration::from_secs(3600), &exit_by_code(1));
+        let plan = plan_restart(60, 5, 60, Duration::from_secs(3600), 10, &exit_by_code(1));
         assert_eq!(plan.wait_secs, 5);
         assert_eq!(plan.next_backoff, 10);
     }
@@ -842,7 +851,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn quick_crash_keeps_growing_backoff() {
-        let plan = plan_restart(20, 5, 60, Duration::from_millis(300), &exit_by_code(1));
+        let plan = plan_restart(20, 5, 60, Duration::from_millis(300), 10, &exit_by_code(1));
         assert_eq!(plan.wait_secs, 20);
         assert_eq!(plan.next_backoff, 40);
     }
@@ -853,7 +862,7 @@ mod tests {
     #[test]
     fn sigterm_after_healthy_run_is_a_restart_not_a_crash() {
         for status in [exit_by_signal(15), exit_by_code(143)] {
-            let plan = plan_restart(40, 5, 60, Duration::from_secs(3600), &status);
+            let plan = plan_restart(40, 5, 60, Duration::from_secs(3600), 10, &status);
             assert_eq!(plan.wait_secs, 5, "{status:?}");
             assert_eq!(plan.next_backoff, 5, "{status:?}");
         }
@@ -865,7 +874,7 @@ mod tests {
     #[test]
     fn quick_repeated_sigterm_exit_still_backs_off() {
         for status in [exit_by_signal(15), exit_by_code(143)] {
-            let plan = plan_restart(20, 5, 60, Duration::from_millis(300), &status);
+            let plan = plan_restart(20, 5, 60, Duration::from_millis(300), 10, &status);
             assert_eq!(plan.wait_secs, 20, "{status:?}");
             assert_eq!(plan.next_backoff, 40, "{status:?}");
         }
@@ -876,10 +885,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn uncapped_backoff_needs_uptime_beyond_the_current_wait() {
-        let crashed_early = plan_restart(300, 5, 0, Duration::from_secs(20), &exit_by_code(1));
+        let crashed_early = plan_restart(300, 5, 0, Duration::from_secs(20), 10, &exit_by_code(1));
         assert_eq!(crashed_early.wait_secs, 300);
         assert_eq!(crashed_early.next_backoff, 600);
-        let healthy = plan_restart(300, 5, 0, Duration::from_secs(301), &exit_by_code(1));
+        let healthy = plan_restart(300, 5, 0, Duration::from_secs(301), 10, &exit_by_code(1));
         assert_eq!(healthy.wait_secs, 5);
     }
 
@@ -888,7 +897,7 @@ mod tests {
     #[test]
     fn sigkill_and_nonzero_exit_are_still_crashes() {
         for status in [exit_by_signal(9), exit_by_code(1), exit_by_code(137)] {
-            let plan = plan_restart(10, 5, 60, Duration::from_secs(1), &status);
+            let plan = plan_restart(10, 5, 60, Duration::from_secs(1), 10, &status);
             assert_eq!(plan.wait_secs, 10, "{status:?}");
             assert_eq!(plan.next_backoff, 20, "{status:?}");
         }
@@ -898,11 +907,81 @@ mod tests {
     /// a daemon must outlive its own worst wait before it counts as healthy.
     #[test]
     fn healthy_uptime_bar_scales_with_the_cap() {
-        assert_eq!(healthy_uptime(5, 60, 5), Duration::from_secs(60));
-        assert_eq!(healthy_uptime(1, 2, 1), Duration::from_secs(10));
-        assert_eq!(healthy_uptime(0, 0, 0), Duration::from_secs(10));
-        assert_eq!(healthy_uptime(90, 0, 90), Duration::from_secs(90));
-        assert_eq!(healthy_uptime(5, 0, 300), Duration::from_secs(300));
+        assert_eq!(healthy_uptime(10, 5, 60, 5), Duration::from_secs(60));
+        assert_eq!(healthy_uptime(10, 1, 2, 1), Duration::from_secs(10));
+        assert_eq!(healthy_uptime(10, 0, 0, 0), Duration::from_secs(10));
+        assert_eq!(healthy_uptime(10, 90, 0, 90), Duration::from_secs(90));
+        assert_eq!(healthy_uptime(10, 5, 0, 300), Duration::from_secs(300));
+    }
+
+    /// Wiring proof for backoff1003: the supervisor loop must feed the real
+    /// uptime into plan_restart and restart the uptime clock on each respawn.
+    /// Two instant crashes grow the wait to the 4 s cap; a run that outlives the
+    /// cap then crashes, and the next respawn must come after the initial 1 s,
+    /// not the 4 s cap. The crash after that must back off again (2 s), which
+    /// only holds when each respawn restarts the uptime clock. Takes about 11 s.
+    #[tokio::test]
+    async fn supervisor_resets_backoff_after_healthy_uptime() {
+        let dir = temp_repo_dir("shell-exec-backoff-reset");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let starts = dir.join("starts.log");
+        let script = format!(
+            "n=$(wc -l < '{f}' 2>/dev/null | tr -d ' '); n=${{n:-0}}; \
+             python3 -c 'import time; print(time.time())' >> '{f}'; \
+             if [ \"$n\" -eq 2 ]; then sleep 4.5; fi; exit 1",
+            f = starts.display()
+        );
+
+        let mut exec = Exec::new(ExecConfig {
+            watch: None,
+            exec: vec![script],
+            restart: Some(RestartPolicy {
+                on_crash: true,
+                backoff_secs: 1,
+                max_backoff_secs: 4,
+            }),
+            health: None,
+        });
+        exec.healthy_floor_secs = 0;
+
+        let runner = tokio::spawn({
+            let exec = exec.clone();
+            async move { exec.run().await }
+        });
+
+        let read_starts = || -> Vec<f64> {
+            fs::read_to_string(&starts)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.trim().parse().ok())
+                .collect()
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while read_starts().len() < 5 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        exec.shutdown().await;
+        let _ = runner.await.expect("join run task");
+
+        let t = read_starts();
+        assert!(t.len() >= 5, "expected 5 spawns, saw {}", t.len());
+        // t[2] is the healthy run (about 4.5 s up). A reset gives about
+        // 4.5 + 1 + poll latency; no reset would add the full 4 s wait.
+        let gap = t[3] - t[2];
+        assert!(
+            gap < 7.0,
+            "respawn after a healthy run waited too long: {gap:.1}s between spawns"
+        );
+        // t[3] crashed instantly after the reset, so the streak restarts at 1 s
+        // and the wait doubles to 2 s. A stale uptime clock would call it healthy
+        // and wait only 1 s.
+        let gap_after = t[4] - t[3];
+        assert!(
+            gap_after >= 1.8,
+            "a quick crash after the reset must back off again: {gap_after:.1}s between spawns"
+        );
+
+        fs::remove_dir_all(dir).ok();
     }
 
     /// Back-compat: with NO restart/health, the long-lived command is spawned
