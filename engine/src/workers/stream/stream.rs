@@ -974,6 +974,7 @@ mod tests {
         update_result: Mutex<Result<UpdateResult, String>>,
         emitted_messages: Mutex<Vec<StreamWrapperMessage>>,
         destroy_called: AtomicBool,
+        destroy_result: Mutex<Result<(), String>>,
         watch_events_called: AtomicBool,
     }
 
@@ -997,6 +998,7 @@ mod tests {
                 })),
                 emitted_messages: Mutex::new(Vec::new()),
                 destroy_called: AtomicBool::new(false),
+                destroy_result: Mutex::new(Ok(())),
                 watch_events_called: AtomicBool::new(false),
             }
         }
@@ -1103,7 +1105,11 @@ mod tests {
 
         async fn destroy(&self) -> anyhow::Result<()> {
             self.destroy_called.store(true, Ordering::SeqCst);
-            Ok(())
+            self.destroy_result
+                .lock()
+                .unwrap()
+                .clone()
+                .map_err(|e| anyhow::anyhow!(e))
         }
 
         async fn update(
@@ -1979,6 +1985,17 @@ mod tests {
         // - "skip-error":  condition returns error                -> skipped
         // - "handler-error": no condition, handler fails (no add) -> +0
         assert_eq!(handler_calls.load(Ordering::SeqCst), 2);
+    }
+
+    // Codex review (hex watchdurable1003): a stream store that failed to
+    // flush at shutdown was reported as a clean teardown.
+    #[tokio::test]
+    async fn stream_destroy_reports_an_adapter_destroy_error() {
+        let adapter = Arc::new(FakeStreamAdapter::default());
+        *adapter.destroy_result.lock().unwrap() = Err("flush failed: events".to_string());
+        let module = create_module_with_adapter(adapter.clone());
+        let err = module.destroy().await.expect_err("a failed flush is loud");
+        assert!(err.to_string().contains("flush failed"), "{err}");
     }
 
     #[tokio::test]

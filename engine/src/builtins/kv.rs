@@ -642,6 +642,48 @@ mod test {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    // Codex re-review: the save loop could drain a post-shutdown write and be
+    // aborted mid-write. Writers race shutdown with a 1 ms save loop; every
+    // write must be on disk after.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn writes_racing_shutdown_all_reach_disk() {
+        for round in 0..20 {
+            let dir = temp_store_dir();
+            let config = serde_json::json!({
+                "store_method": "file_based",
+                "file_path": dir.to_string_lossy(),
+                "save_interval_ms": 1
+            });
+            let kv_store = Arc::new(BuiltinKvStore::new(Some(config.clone())));
+            let mut writers = Vec::new();
+            for i in 0..40 {
+                let kv = Arc::clone(&kv_store);
+                writers.push(tokio::spawn(async move {
+                    kv.set(format!("idx{i}"), "k".to_string(), serde_json::json!(i))
+                        .await;
+                }));
+                if i == 20 {
+                    let kv = Arc::clone(&kv_store);
+                    writers.push(tokio::spawn(async move {
+                        kv.shutdown().await.expect("shutdown");
+                    }));
+                }
+            }
+            for w in writers {
+                w.await.unwrap();
+            }
+            let reopened = BuiltinKvStore::new(Some(config));
+            for i in 0..40 {
+                assert_eq!(
+                    reopened.get(format!("idx{i}"), "k".to_string()).await,
+                    Some(serde_json::json!(i)),
+                    "round {round}: idx{i} lost"
+                );
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_builtin_kv_store_invalid_store_method() {
         // when this happens it should default to in_memory
