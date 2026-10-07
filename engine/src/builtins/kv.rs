@@ -173,10 +173,9 @@ pub struct BuiltinKvStore {
     store: Arc<RwLock<HashMap<String, IndexMap<String, Value>>>>,
     file_store_dir: Option<PathBuf>,
     dirty: Arc<RwLock<HashMap<String, DirtyOp>>>,
-    #[allow(
-        dead_code,
-        reason = "Going to be used in the future for graceful shutdown"
-    )]
+    /// Held while a batch of dirty indexes is written, by the save loop and by
+    /// `shutdown`, so shutdown waits for a batch already in flight.
+    save_lock: Arc<tokio::sync::Mutex<()>>,
     handler: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -233,11 +232,13 @@ impl BuiltinKvStore {
         };
         let store = Arc::new(RwLock::new(data_from_disk));
         let dirty = Arc::new(RwLock::new(HashMap::new()));
+        let save_lock = Arc::new(tokio::sync::Mutex::new(()));
         let handler = file_store_dir.clone().map(|dir| {
             let store = Arc::clone(&store);
             let dirty = Arc::clone(&dirty);
+            let save_lock = Arc::clone(&save_lock);
             tokio::spawn(async move {
-                Self::save_loop(store, dirty, interval, dir).await;
+                Self::save_loop(store, dirty, save_lock, interval, dir).await;
             })
         });
 
@@ -245,13 +246,70 @@ impl BuiltinKvStore {
             store,
             file_store_dir,
             dirty,
+            save_lock,
             handler,
         }
+    }
+
+    /// Writes every pending change to disk now, then stops the save loop.
+    /// Without this, a write in the last save interval before the engine
+    /// exits is lost. Returns an error naming each index it could not write.
+    pub async fn shutdown(&self) -> anyhow::Result<()> {
+        let result = match &self.file_store_dir {
+            Some(dir) => {
+                let _guard = self.save_lock.lock().await;
+                let failed = Self::persist_dirty(&self.store, &self.dirty, dir).await;
+                if failed.is_empty() {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "kv store: {} index(es) not written at shutdown: {}",
+                        failed.len(),
+                        failed.join("; ")
+                    ))
+                }
+            }
+            None => Ok(()),
+        };
+        if let Some(handler) = &self.handler {
+            handler.abort();
+        }
+        result
+    }
+
+    /// Drains the dirty set and writes each index. A failed index goes back
+    /// into the dirty set and is returned as "<index>: <error>".
+    async fn persist_dirty(
+        store: &RwLock<HashMap<String, IndexMap<String, Value>>>,
+        dirty: &RwLock<HashMap<String, DirtyOp>>,
+        dir: &Path,
+    ) -> Vec<String> {
+        let batch = dirty.write().await.drain().collect::<Vec<_>>();
+        let mut failed = Vec::new();
+        for (index, op) in batch {
+            let result = match op {
+                DirtyOp::Upsert => {
+                    let value = store.read().await.get(&index).cloned();
+                    match value {
+                        Some(value) => persist_index_to_disk(dir, &index, &value).await,
+                        None => Ok(()),
+                    }
+                }
+                DirtyOp::Delete => delete_index_from_disk(dir, &index).await,
+            };
+            if let Err(err) = result {
+                tracing::error!(error = ?err, index = %index, "failed to persist index");
+                failed.push(format!("{index}: {err}"));
+                dirty.write().await.insert(index, op);
+            }
+        }
+        failed
     }
 
     async fn save_loop(
         store: Arc<RwLock<HashMap<String, IndexMap<String, Value>>>>,
         dirty: Arc<RwLock<HashMap<String, DirtyOp>>>,
+        save_lock: Arc<tokio::sync::Mutex<()>>,
         polling_interval: u64,
         dir: PathBuf,
     ) {
@@ -259,38 +317,8 @@ impl BuiltinKvStore {
             tokio::time::interval(std::time::Duration::from_millis(polling_interval));
         loop {
             interval.tick().await;
-            let batch = {
-                let mut dirty = dirty.write().await;
-                if dirty.is_empty() {
-                    continue;
-                }
-                dirty.drain().collect::<Vec<_>>()
-            };
-
-            for (index, op) in batch {
-                match op {
-                    DirtyOp::Upsert => {
-                        let value = {
-                            let store = store.read().await;
-                            store.get(&index).cloned()
-                        };
-                        if let Some(value) = value
-                            && let Err(err) = persist_index_to_disk(&dir, &index, &value).await
-                        {
-                            tracing::error!(error = ?err, index = %index, "failed to persist index");
-                            let mut dirty = dirty.write().await;
-                            dirty.insert(index, DirtyOp::Upsert);
-                        }
-                    }
-                    DirtyOp::Delete => {
-                        if let Err(err) = delete_index_from_disk(&dir, &index).await {
-                            tracing::error!(error = ?err, index = %index, "failed to delete index");
-                            let mut dirty = dirty.write().await;
-                            dirty.insert(index, DirtyOp::Delete);
-                        }
-                    }
-                }
-            }
+            let _guard = save_lock.lock().await;
+            Self::persist_dirty(&store, &dirty, &dir).await;
         }
     }
 

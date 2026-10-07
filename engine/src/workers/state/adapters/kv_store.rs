@@ -37,7 +37,7 @@ impl BuiltinKvStoreAdapter {
 #[async_trait]
 impl StateAdapter for BuiltinKvStoreAdapter {
     async fn destroy(&self) -> anyhow::Result<()> {
-        Ok(())
+        self.storage.shutdown().await
     }
 
     async fn set(&self, scope: &str, key: &str, value: Value) -> anyhow::Result<SetResult> {
@@ -116,12 +116,18 @@ mod tests {
         // below waits on the long interval.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let data = serde_json::json!({"n": 1});
-        adapter.set("events", "watch.fired", data.clone()).await.unwrap();
+        adapter
+            .set("events", "watch.fired", data.clone())
+            .await
+            .unwrap();
 
         adapter.destroy().await.expect("destroy flushes");
 
         let reopened = BuiltinKvStoreAdapter::new(Some(file_config(&dir)));
-        assert_eq!(reopened.get("events", "watch.fired").await.unwrap(), Some(data));
+        assert_eq!(
+            reopened.get("events", "watch.fired").await.unwrap(),
+            Some(data)
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -129,7 +135,10 @@ mod tests {
     async fn a_delete_just_before_destroy_is_gone_after_destroy() {
         let dir = temp_dir();
         let adapter = BuiltinKvStoreAdapter::new(Some(file_config(&dir)));
-        adapter.set("events", "a", serde_json::json!(1)).await.unwrap();
+        adapter
+            .set("events", "a", serde_json::json!(1))
+            .await
+            .unwrap();
         adapter.destroy().await.expect("first destroy flushes");
 
         let adapter = BuiltinKvStoreAdapter::new(Some(file_config(&dir)));
@@ -147,7 +156,10 @@ mod tests {
         let dir = temp_dir();
         let adapter = BuiltinKvStoreAdapter::new(Some(file_config(&dir)));
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        adapter.set("events", "x", serde_json::json!(1)).await.unwrap();
+        adapter
+            .set("events", "x", serde_json::json!(1))
+            .await
+            .unwrap();
         // Replace the store folder with a file, so the flush cannot write.
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::write(&dir, b"not a folder").unwrap();
