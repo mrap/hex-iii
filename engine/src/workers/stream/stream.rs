@@ -147,8 +147,7 @@ impl Worker for StreamWorker {
         for abort in aborts {
             abort.abort();
         }
-        let _ = self.adapter.destroy().await;
-        Ok(())
+        self.adapter.destroy().await
     }
 
     async fn initialize(&self) -> anyhow::Result<()> {

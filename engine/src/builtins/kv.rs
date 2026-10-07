@@ -279,9 +279,14 @@ impl BuiltinKvStore {
         // Before the drain: any write whose dirty mark misses the drain sees
         // `closed` and persists itself (mark_dirty).
         self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Stop the save loop while holding the save lock, so it is never
+        // mid-write when aborted and cannot drain a write after this point.
+        let _guard = self.save_lock.lock().await;
+        if let Some(handler) = &self.handler {
+            handler.abort();
+        }
         let result = match &self.file_store_dir {
             Some(dir) => {
-                let _guard = self.save_lock.lock().await;
                 let failed = Self::persist_dirty(&self.store, &self.dirty, dir).await;
                 if failed.is_empty() {
                     Ok(())
@@ -295,9 +300,6 @@ impl BuiltinKvStore {
             }
             None => Ok(()),
         };
-        if let Some(handler) = &self.handler {
-            handler.abort();
-        }
         result
     }
 
