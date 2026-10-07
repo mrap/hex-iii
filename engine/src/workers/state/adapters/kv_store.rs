@@ -91,6 +91,72 @@ crate::register_adapter!(<StateAdapterRegistration> name: "kv", make_adapter);
 mod tests {
     use super::*;
 
+    fn file_config(dir: &std::path::Path) -> Value {
+        // A save interval far longer than any test: only destroy() can write.
+        serde_json::json!({
+            "store_method": "file_based",
+            "file_path": dir.to_string_lossy(),
+            "save_interval_ms": 3_600_000u64
+        })
+    }
+
+    fn temp_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("kv_flush_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // hex watchdurable1003 phase 2: a write in the last save interval before a
+    // harness restart was lost because destroy() did not flush.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_set_just_before_destroy_is_on_disk_after_destroy() {
+        let dir = temp_dir();
+        let adapter = BuiltinKvStoreAdapter::new(Some(file_config(&dir)));
+        // Let the save loop take its first (immediate) tick, so the write
+        // below waits on the long interval.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let data = serde_json::json!({"n": 1});
+        adapter.set("events", "watch.fired", data.clone()).await.unwrap();
+
+        adapter.destroy().await.expect("destroy flushes");
+
+        let reopened = BuiltinKvStoreAdapter::new(Some(file_config(&dir)));
+        assert_eq!(reopened.get("events", "watch.fired").await.unwrap(), Some(data));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delete_just_before_destroy_is_gone_after_destroy() {
+        let dir = temp_dir();
+        let adapter = BuiltinKvStoreAdapter::new(Some(file_config(&dir)));
+        adapter.set("events", "a", serde_json::json!(1)).await.unwrap();
+        adapter.destroy().await.expect("first destroy flushes");
+
+        let adapter = BuiltinKvStoreAdapter::new(Some(file_config(&dir)));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        adapter.delete("events", "a").await.unwrap();
+        adapter.destroy().await.expect("second destroy flushes");
+
+        let reopened = BuiltinKvStoreAdapter::new(Some(file_config(&dir)));
+        assert_eq!(reopened.get("events", "a").await.unwrap(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn destroy_reports_a_write_it_could_not_flush() {
+        let dir = temp_dir();
+        let adapter = BuiltinKvStoreAdapter::new(Some(file_config(&dir)));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        adapter.set("events", "x", serde_json::json!(1)).await.unwrap();
+        // Replace the store folder with a file, so the flush cannot write.
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::write(&dir, b"not a folder").unwrap();
+
+        let err = adapter.destroy().await.expect_err("a failed flush is loud");
+        assert!(err.to_string().contains("events"), "names the index: {err}");
+        std::fs::remove_file(&dir).unwrap();
+    }
+
     #[tokio::test]
     async fn test_kv_store_adapter_set_get_delete() {
         let builtin_adapter = BuiltinKvStoreAdapter::new(None);
