@@ -121,6 +121,11 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "the save loop wrote early; the test would pass without destroy"
+        );
         adapter.destroy().await.expect("destroy flushes");
 
         let reopened = BuiltinKvStoreAdapter::new(Some(file_config(&dir)));
@@ -144,6 +149,11 @@ mod tests {
         let adapter = BuiltinKvStoreAdapter::new(Some(file_config(&dir)));
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         adapter.delete("events", "a").await.unwrap();
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "the save loop deleted early; the test would pass without destroy"
+        );
         adapter.destroy().await.expect("second destroy flushes");
 
         let reopened = BuiltinKvStoreAdapter::new(Some(file_config(&dir)));

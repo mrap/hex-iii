@@ -483,7 +483,15 @@ async fn destroy_running_workers(
 ) -> anyhow::Result<()> {
     let mut first_error = None;
 
-    for rw in running.iter() {
+    // iii-state goes last: a worker that writes state while it shuts down
+    // (an emit on shutdown) must find the store still able to flush it.
+    let is_state = |rw: &&super::reload::RunningWorker| rw.entry.worker_type() == "iii-state";
+    let ordered = running
+        .iter()
+        .filter(|rw| !is_state(rw))
+        .chain(running.iter().filter(is_state));
+
+    for rw in ordered {
         tracing::debug!("Destroying worker: {}", rw.worker.name());
         let _ = rw.shutdown_tx.send(true);
         let destroy_result = rw.worker.destroy().await;
@@ -2111,6 +2119,85 @@ modules:
         assert!(
             engine.list_runtime_workers().is_empty(),
             "all runtime snapshots should be removed even after a destroy failure"
+        );
+    }
+
+    // hex watchdurable1003 phase 2: a worker torn down after iii-state that
+    // still writes state on shutdown would lose that write, so state goes last.
+    #[tokio::test]
+    async fn teardown_destroys_the_state_worker_last() {
+        use std::sync::Mutex;
+
+        use async_trait::async_trait;
+
+        static ORDER: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+
+        struct RecordingStateWorker;
+        struct RecordingOtherWorker;
+
+        #[async_trait]
+        impl Worker for RecordingStateWorker {
+            fn name(&self) -> &'static str {
+                "RecordingStateWorker"
+            }
+            async fn create(
+                _engine: Arc<Engine>,
+                _config: Option<Value>,
+            ) -> anyhow::Result<Box<dyn Worker>> {
+                Ok(Box::new(RecordingStateWorker))
+            }
+            async fn initialize(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn destroy(&self) -> anyhow::Result<()> {
+                ORDER.lock().unwrap().push("state");
+                Ok(())
+            }
+        }
+
+        #[async_trait]
+        impl Worker for RecordingOtherWorker {
+            fn name(&self) -> &'static str {
+                "RecordingOtherWorker"
+            }
+            async fn create(
+                _engine: Arc<Engine>,
+                _config: Option<Value>,
+            ) -> anyhow::Result<Box<dyn Worker>> {
+                Ok(Box::new(RecordingOtherWorker))
+            }
+            async fn initialize(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn destroy(&self) -> anyhow::Result<()> {
+                ORDER.lock().unwrap().push("other");
+                Ok(())
+            }
+        }
+
+        ORDER.lock().unwrap().clear();
+        let builder = EngineBuilder::new()
+            .register_worker::<RecordingStateWorker>("iii-state")
+            .register_worker::<RecordingOtherWorker>("test::Other")
+            .add_worker("iii-state", None)
+            .add_worker("test::Other", None)
+            .build()
+            .await
+            .expect("build engine");
+
+        builder.destroy().await.expect("destroy engine");
+        let order = ORDER.lock().unwrap().clone();
+        let state_at = order
+            .iter()
+            .position(|w| *w == "state")
+            .expect("state destroyed");
+        let other_at = order
+            .iter()
+            .position(|w| *w == "other")
+            .expect("other destroyed");
+        assert!(
+            other_at < state_at,
+            "state must be destroyed last, got {order:?}"
         );
     }
 
