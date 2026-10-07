@@ -54,7 +54,7 @@ impl BuiltinKvStoreAdapter {
 #[async_trait]
 impl StreamAdapter for BuiltinKvStoreAdapter {
     async fn destroy(&self) -> anyhow::Result<()> {
-        Ok(())
+        self.storage.shutdown().await
     }
 
     async fn update(
@@ -213,6 +213,36 @@ mod tests {
 
     use super::*;
     use crate::{builtins::pubsub_lite::Subscriber, workers::stream::StreamOutboundMessage};
+
+    // hex watchdurable1003 phase 2 (Codex): the stream kv adapter also owns a
+    // file-backed store; its destroy() must flush like the state adapter's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stream_destroy_flushes_a_set_from_the_last_interval() {
+        let dir = std::env::temp_dir().join(format!("stream_flush_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = json!({
+            "store_method": "file_based",
+            "file_path": dir.to_string_lossy(),
+            "save_interval_ms": 3_600_000u64
+        });
+        let adapter = BuiltinKvStoreAdapter::new(Some(config.clone()));
+        sleep(Duration::from_millis(50)).await;
+        adapter.set("s", "g", "i", json!({"v": 1})).await.unwrap();
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "save loop wrote early"
+        );
+
+        adapter.destroy().await.expect("destroy flushes");
+
+        let reopened = BuiltinKvStoreAdapter::new(Some(config));
+        assert_eq!(
+            reopened.get("s", "g", "i").await.unwrap(),
+            Some(json!({"v": 1}))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     struct RecordingConnection {
         tx: mpsc::UnboundedSender<StreamWrapperMessage>,

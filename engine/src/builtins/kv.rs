@@ -176,6 +176,9 @@ pub struct BuiltinKvStore {
     /// Held while a batch of dirty indexes is written, by the save loop and by
     /// `shutdown`, so shutdown waits for a batch already in flight.
     save_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Set by `shutdown` before it drains. A write that lands after that
+    /// persists itself, since no save loop is left to do it.
+    closed: std::sync::atomic::AtomicBool,
     handler: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -247,7 +250,25 @@ impl BuiltinKvStore {
             file_store_dir,
             dirty,
             save_lock,
+            closed: std::sync::atomic::AtomicBool::new(false),
             handler,
+        }
+    }
+
+    /// Marks an index dirty. After shutdown, also writes it now.
+    async fn mark_dirty(&self, index: String, op: DirtyOp) {
+        self.dirty.write().await.insert(index, op);
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst)
+            && let Some(dir) = &self.file_store_dir
+        {
+            let _guard = self.save_lock.lock().await;
+            let failed = Self::persist_dirty(&self.store, &self.dirty, dir).await;
+            if !failed.is_empty() {
+                tracing::error!(
+                    failed = %failed.join("; "),
+                    "kv store: a write after shutdown was not persisted"
+                );
+            }
         }
     }
 
@@ -255,6 +276,9 @@ impl BuiltinKvStore {
     /// Without this, a write in the last save interval before the engine
     /// exits is lost. Returns an error naming each index it could not write.
     pub async fn shutdown(&self) -> anyhow::Result<()> {
+        // Before the drain: any write whose dirty mark misses the drain sees
+        // `closed` and persists itself (mark_dirty).
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
         let result = match &self.file_store_dir {
             Some(dir) => {
                 let _guard = self.save_lock.lock().await;
@@ -348,7 +372,7 @@ impl BuiltinKvStore {
         };
 
         if self.file_store_dir.is_some() {
-            self.dirty.write().await.insert(index, DirtyOp::Upsert);
+            self.mark_dirty(index, DirtyOp::Upsert).await;
         }
 
         result
@@ -391,7 +415,7 @@ impl BuiltinKvStore {
             && self.file_store_dir.is_some()
             && let Some(dirty_op) = dirty_op
         {
-            self.dirty.write().await.insert(index, dirty_op);
+            self.mark_dirty(index, dirty_op).await;
         }
 
         removed
@@ -427,10 +451,7 @@ impl BuiltinKvStore {
         };
 
         if acquired && self.file_store_dir.is_some() {
-            self.dirty
-                .write()
-                .await
-                .insert(index.to_string(), DirtyOp::Upsert);
+            self.mark_dirty(index.to_string(), DirtyOp::Upsert).await;
         }
 
         acquired
@@ -470,7 +491,7 @@ impl BuiltinKvStore {
             && self.file_store_dir.is_some()
             && let Some(dirty_op) = dirty_op
         {
-            self.dirty.write().await.insert(index.to_string(), dirty_op);
+            self.mark_dirty(index.to_string(), dirty_op).await;
         }
 
         released
@@ -491,10 +512,7 @@ impl BuiltinKvStore {
         drop(store);
 
         if self.file_store_dir.is_some() {
-            self.dirty
-                .write()
-                .await
-                .insert(index.clone(), DirtyOp::Upsert);
+            self.mark_dirty(index.clone(), DirtyOp::Upsert).await;
         }
 
         UpdateResult {
@@ -595,6 +613,32 @@ mod test {
             );
         }
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Codex review of the shutdown flush: a write that marks itself dirty
+    // after shutdown drained the set was never persisted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_set_after_shutdown_still_reaches_disk() {
+        let dir = temp_store_dir();
+        let config = serde_json::json!({
+            "store_method": "file_based",
+            "file_path": dir.to_string_lossy(),
+            "save_interval_ms": 3_600_000u64
+        });
+        let kv_store = BuiltinKvStore::new(Some(config.clone()));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        kv_store.shutdown().await.expect("shutdown");
+
+        kv_store
+            .set("late".to_string(), "k".to_string(), serde_json::json!(7))
+            .await;
+
+        let reopened = BuiltinKvStore::new(Some(config));
+        assert_eq!(
+            reopened.get("late".to_string(), "k".to_string()).await,
+            Some(serde_json::json!(7))
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
