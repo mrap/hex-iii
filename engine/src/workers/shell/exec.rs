@@ -46,7 +46,16 @@ pub struct Exec {
     /// Minimum uptime (seconds) before an exit counts as a fresh crash. Tests
     /// shorten it; production keeps HEALTHY_UPTIME_FLOOR_SECS.
     healthy_floor_secs: u64,
+    /// Where each spawned process records `{pid, started_unix}` (from
+    /// `III_EXEC_PID_DIR`). The host reaps these on its own shutdown and after
+    /// a crash: setsid'd daemons outlive an engine that is aborted or killed,
+    /// and a hung one ignores the next start's SIGTERM cleanup (hex
+    /// foundation-fixes, a voice outage 2026-10-06). None = no records.
+    pid_dir: Option<std::path::PathBuf>,
 }
+
+/// Env var naming the pid record directory (see `Exec::pid_dir`).
+pub const PID_DIR_ENV: &str = "III_EXEC_PID_DIR";
 
 /// Floor for `healthy_uptime`, in seconds.
 const HEALTHY_UPTIME_FLOOR_SECS: u64 = 10;
@@ -72,6 +81,29 @@ impl Exec {
             shutdown_rx,
             shutdown_called: Arc::new(AtomicBool::new(false)),
             healthy_floor_secs: HEALTHY_UPTIME_FLOOR_SECS,
+            pid_dir: std::env::var_os(PID_DIR_ENV)
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from),
+        }
+    }
+
+    /// Record a spawned process for the host's reaper. A write failure is
+    /// logged at error level and never stops the spawn: the process runs
+    /// either way, it is only harder to reap.
+    fn record_pid(&self, pid: u32) {
+        let Some(dir) = &self.pid_dir else { return };
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let body = format!("{{\"pid\":{pid},\"started_unix\":{started}}}\n");
+        let path = dir.join(format!("exec-{pid}.json"));
+        let tmp = dir.join(format!(".exec-{pid}.json.tmp"));
+        let res = std::fs::create_dir_all(dir)
+            .and_then(|()| std::fs::write(&tmp, body))
+            .and_then(|()| std::fs::rename(&tmp, &path));
+        if let Err(e) = res {
+            tracing::error!("exec: could not record pid {pid} in {}: {e}", dir.display());
         }
     }
 
@@ -438,7 +470,11 @@ impl Exec {
 
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
 
-        Ok(cmd.spawn()?)
+        let child = cmd.spawn()?;
+        if let Some(pid) = child.id() {
+            self.record_pid(pid);
+        }
+        Ok(child)
     }
 
     fn should_restart(&self, event: &Event) -> bool {
@@ -694,6 +730,44 @@ mod tests {
             child_pid,
             pids_after
         );
+    }
+
+    /// foundation-fixes 2026-10-06 (a voice outage): every spawn,
+    /// first or respawn, leaves a pid record the host can reap after the
+    /// engine is aborted or killed.
+    #[tokio::test]
+    async fn every_spawn_records_its_pid_for_the_host_reaper() {
+        let dir = temp_repo_dir("pid-dir");
+        let mut exec = Exec::new(ExecConfig {
+            watch: None,
+            exec: vec!["sleep 300".to_string()],
+            ..Default::default()
+        });
+        exec.pid_dir = Some(dir.clone());
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let first = exec.spawn_single(&exec.exec[0]).unwrap();
+        let second = exec.respawn(&exec.exec[0]).await.unwrap();
+        for child in [&first, &second] {
+            let pid = child.id().unwrap();
+            let rec: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(dir.join(format!("exec-{pid}.json"))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(rec["pid"], pid);
+            let started = rec["started_unix"].as_u64().unwrap();
+            assert!(started >= before && started <= before + 5, "{rec}");
+        }
+        for child in [first, second] {
+            let pid = child.id().unwrap() as i32;
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Same test but for kill_process() (the file-change restart path).
