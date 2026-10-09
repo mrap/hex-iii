@@ -208,7 +208,10 @@ impl Worker for StreamWorker {
             .map_err(|err| crate::workers::traits::bind_address_error(addr, err))?;
         let app = Router::new()
             .route("/", get(ws_handler))
-            .with_state(socket_manager);
+            .with_state(socket_manager)
+            .layer(axum::middleware::from_fn(
+                crate::workers::origin_guard::refuse_browser_origin,
+            ));
 
         let mut server_shutdown_rx = shutdown_rx.clone();
         let server_handle = tokio::spawn(async move {

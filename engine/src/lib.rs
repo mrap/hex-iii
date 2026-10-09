@@ -28,6 +28,7 @@ pub mod workers {
     pub mod external;
     pub mod http_functions;
     pub mod observability;
+    pub mod origin_guard;
     pub mod pubsub;
     pub mod queue;
     pub mod redis;

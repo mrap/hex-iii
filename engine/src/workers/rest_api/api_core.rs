@@ -328,8 +328,10 @@ impl HttpWorker {
     }
     /// Builds the CorsLayer based on configuration
     fn build_cors_layer(&self) -> CorsLayer {
+        // No `cors` config means no cross-origin grants. Browser requests are
+        // refused by origin_guard before routing anyway (hex enginews1009).
         let Some(cors_config) = &self.config.cors else {
-            return CorsLayer::permissive();
+            return CorsLayer::new();
         };
 
         let mut cors = CorsLayer::new();
