@@ -670,9 +670,29 @@ mod tests {
     }
 
     #[test]
-    fn build_cors_layer_no_config_returns_permissive() {
+    fn build_cors_layer_no_config_grants_no_origin() {
+        use tower::{Layer, ServiceExt};
         let module = make_worker_with_cors(None);
-        let _cors = module.build_cors_layer();
+        let svc = module.build_cors_layer().layer(tower::service_fn(
+            |_req: axum::http::Request<axum::body::Body>| async {
+                Ok::<_, std::convert::Infallible>(axum::http::Response::new(
+                    axum::body::Body::empty(),
+                ))
+            },
+        ));
+        let req = axum::http::Request::builder()
+            .uri("/x")
+            .header("origin", "https://evil.example")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(svc.oneshot(req))
+            .unwrap();
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "no cors config must not grant any origin (hex enginews1009)"
+        );
     }
 
     #[test]
