@@ -52,10 +52,19 @@ pub struct Exec {
     /// and a hung one ignores the next start's SIGTERM cleanup (hex
     /// foundation-fixes, a voice outage 2026-10-06). None = no records.
     pid_dir: Option<std::path::PathBuf>,
+    /// JSONL file that gets one `worker.restart` record per supervisor restart
+    /// (from `III_EXEC_RESTART_LOG`): the rule, the probe results behind it,
+    /// load1, and uptime. The host tails it into its own telemetry. None = no
+    /// record; the stderr line is written either way. (restartwhy1022: the
+    /// reason lived only in `tracing` events, which the host never prints.)
+    restart_log: Option<std::path::PathBuf>,
 }
 
 /// Env var naming the pid record directory (see `Exec::pid_dir`).
 pub const PID_DIR_ENV: &str = "III_EXEC_PID_DIR";
+
+/// Env var naming the restart-reason JSONL file (see `Exec::restart_log`).
+pub const RESTART_LOG_ENV: &str = "III_EXEC_RESTART_LOG";
 
 /// Floor for `healthy_uptime`, in seconds.
 const HEALTHY_UPTIME_FLOOR_SECS: u64 = 10;
@@ -84,6 +93,44 @@ impl Exec {
             pid_dir: std::env::var_os(PID_DIR_ENV)
                 .filter(|v| !v.is_empty())
                 .map(std::path::PathBuf::from),
+            restart_log: std::env::var_os(RESTART_LOG_ENV)
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from),
+        }
+    }
+
+    /// Say why the supervisor is restarting the daemon: one `exec::restart`
+    /// line on stderr (the host forwards `exec::` lines to its log) and, when
+    /// `restart_log` is set, one JSON record. A write failure is reported
+    /// loudly and never blocks the restart.
+    fn record_restart(
+        &self,
+        daemon_cmd: &str,
+        rule: &str,
+        uptime: Duration,
+        extra: serde_json::Value,
+    ) {
+        let record = restart_record(daemon_cmd, rule, uptime, load1(), extra);
+        eprintln!("hex harness: exec::restart: {}", restart_line(&record));
+        let Some(path) = &self.restart_log else {
+            return;
+        };
+        let res = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| {
+                use std::io::Write;
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .and_then(|mut f| writeln!(f, "{record}"))
+            });
+        if let Err(e) = res {
+            eprintln!(
+                "hex harness: exec::restart-log-failed: could not append to {}: {e}",
+                path.display()
+            );
         }
     }
 
@@ -247,6 +294,8 @@ impl Exec {
             iv.tick().await;
         }
         let mut health_failures: u32 = 0;
+        // Results of the probes in the current failure streak, oldest first.
+        let mut failed_probes: Vec<String> = Vec::new();
 
         let mut exit_poll = tokio::time::interval(EXIT_POLL_INTERVAL);
         exit_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -277,6 +326,16 @@ impl Exec {
                             "exec daemon '{}' exited ({:?}) after {}s up; respawning after {}s backoff",
                             daemon_cmd, status, started_at.elapsed().as_secs(), plan.wait_secs
                         );
+                        self.record_restart(
+                            &daemon_cmd,
+                            "exit",
+                            started_at.elapsed(),
+                            serde_json::json!({
+                                "exit_code": status.code(),
+                                "exit_status": status.to_string(),
+                                "backoff_s": plan.wait_secs,
+                            }),
+                        );
                         if plan.wait_secs > 0 {
                             tokio::select! {
                                 _ = tokio::time::sleep(Duration::from_secs(plan.wait_secs)) => {}
@@ -294,10 +353,13 @@ impl Exec {
                 // 2. Health probe tick.
                 _ = tick_opt(&mut health_timer) => {
                     if let Some(h) = &self.health {
-                        if probe_health(h).await {
+                        let outcome = probe_health(h).await;
+                        if outcome.is_ok() {
                             health_failures = 0;
+                            failed_probes.clear();
                         } else {
                             health_failures += 1;
+                            failed_probes.push(outcome.to_string());
                             tracing::warn!(
                                 "exec daemon '{}' health probe failed ({}/{})",
                                 daemon_cmd, health_failures, h.failure_threshold
@@ -307,6 +369,17 @@ impl Exec {
                                     "exec daemon '{}' failed {} health probes; killing + respawning",
                                     daemon_cmd, h.failure_threshold
                                 );
+                                self.record_restart(
+                                    &daemon_cmd,
+                                    "health_probe",
+                                    started_at.elapsed(),
+                                    serde_json::json!({
+                                        "last_probes": failed_probes,
+                                        "interval_s": h.interval_secs,
+                                        "threshold": h.failure_threshold,
+                                    }),
+                                );
+                                failed_probes.clear();
                                 self.kill_process().await;
                                 if let Some(child) = self.respawn(&daemon_cmd).await {
                                     *self.child.lock().await = Some(child);
@@ -335,6 +408,14 @@ impl Exec {
                                 .collect::<Vec<_>>()
                                 .join(", ")
                                 .purple()
+                        );
+                        self.record_restart(
+                            &daemon_cmd,
+                            "file_watch",
+                            started_at.elapsed(),
+                            serde_json::json!({
+                                "paths": event.paths.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
+                            }),
                         );
                         self.kill_process().await;
                         if let Err(e) = self.run_pipeline().await {
@@ -662,19 +743,118 @@ fn plan_restart(
     }
 }
 
+/// Result of one liveness probe. `Display` is the text recorded in a
+/// `worker.restart` record, so a reader can tell a hung daemon (HTTP 500,
+/// exit 7) from a starved probe (timeout).
+#[derive(Debug, Clone, PartialEq)]
+enum ProbeOutcome {
+    Healthy,
+    Exit(Option<i32>),
+    SpawnError(String),
+    HttpStatus(u16),
+    RequestError(String),
+    Timeout(u64),
+}
+
+impl ProbeOutcome {
+    fn is_ok(&self) -> bool {
+        matches!(self, ProbeOutcome::Healthy)
+    }
+}
+
+impl std::fmt::Display for ProbeOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProbeOutcome::Healthy => write!(f, "ok"),
+            ProbeOutcome::Exit(Some(code)) => write!(f, "exit {code}"),
+            ProbeOutcome::Exit(None) => write!(f, "killed by signal"),
+            ProbeOutcome::SpawnError(e) => write!(f, "spawn error: {e}"),
+            ProbeOutcome::HttpStatus(code) => write!(f, "http {code}"),
+            ProbeOutcome::RequestError(e) => write!(f, "request error: {e}"),
+            ProbeOutcome::Timeout(secs) => write!(f, "timeout after {secs}s"),
+        }
+    }
+}
+
 /// Liveness probe: `command` (exit 0 = healthy) takes precedence over `url`
 /// (HTTP 2xx = healthy). No probe configured → considered healthy.
-async fn probe_health(health: &HealthCheck) -> bool {
-    let budget = Duration::from_secs(health.timeout_secs.max(1));
+async fn probe_health(health: &HealthCheck) -> ProbeOutcome {
+    let secs = health.timeout_secs.max(1);
+    let budget = Duration::from_secs(secs);
     if let Some(cmd) = &health.command {
-        let fut = Command::new("sh").arg("-c").arg(cmd).status();
-        return matches!(timeout(budget, fut).await, Ok(Ok(status)) if status.success());
+        let fut = Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .kill_on_drop(true)
+            .status();
+        return match timeout(budget, fut).await {
+            Err(_) => ProbeOutcome::Timeout(secs),
+            Ok(Err(e)) => ProbeOutcome::SpawnError(e.to_string()),
+            Ok(Ok(status)) if status.success() => ProbeOutcome::Healthy,
+            Ok(Ok(status)) => ProbeOutcome::Exit(status.code()),
+        };
     }
     if let Some(url) = &health.url {
         let fut = reqwest::get(url.as_str());
-        return matches!(timeout(budget, fut).await, Ok(Ok(resp)) if resp.status().is_success());
+        return match timeout(budget, fut).await {
+            Err(_) => ProbeOutcome::Timeout(secs),
+            Ok(Err(e)) => ProbeOutcome::RequestError(e.to_string()),
+            Ok(Ok(resp)) if resp.status().is_success() => ProbeOutcome::Healthy,
+            Ok(Ok(resp)) => ProbeOutcome::HttpStatus(resp.status().as_u16()),
+        };
     }
-    true
+    ProbeOutcome::Healthy
+}
+
+/// One-minute load average, or None where the OS does not report it.
+fn load1() -> Option<f64> {
+    #[cfg(unix)]
+    {
+        let mut avg = [0f64; 1];
+        // SAFETY: `avg` holds the one f64 that getloadavg(.., 1) writes.
+        let n = unsafe { libc::getloadavg(avg.as_mut_ptr(), 1) };
+        (n == 1).then_some(avg[0])
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Build the `worker.restart` record. `extra` must be a JSON object; its keys
+/// are merged in next to the common fields.
+fn restart_record(
+    daemon_cmd: &str,
+    rule: &str,
+    uptime: Duration,
+    load1: Option<f64>,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    let mut record = serde_json::json!({
+        "event": "worker.restart",
+        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "worker": daemon_cmd,
+        "rule": rule,
+        "uptime_s": uptime.as_secs(),
+        "load1": load1,
+    });
+    if let (Some(base), serde_json::Value::Object(more)) = (record.as_object_mut(), extra) {
+        base.extend(more);
+    }
+    record
+}
+
+/// The same record as `key=value` pairs on one line, for the host log.
+fn restart_line(record: &serde_json::Value) -> String {
+    let mut out = Vec::new();
+    if let Some(map) = record.as_object() {
+        for (k, v) in map {
+            if k != "event" {
+                out.push(format!("{k}={v}"));
+            }
+        }
+    }
+    out.join(" ")
 }
 
 #[cfg(test)]
@@ -1133,6 +1313,173 @@ mod tests {
             spawns >= 2,
             "failing health probe should have respawned the daemon, saw {spawns} spawn(s)"
         );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// Read the restart-reason records an `Exec` wrote, one JSON object per line.
+    fn read_restart_records(path: &Path) -> Vec<serde_json::Value> {
+        fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("restart record is JSON"))
+            .collect()
+    }
+
+    /// Incident restartwhy1022: the engine restarted the live voice server with
+    /// no reason anywhere in the harness log. A health-probe restart must leave
+    /// one record naming the rule, every probe result that led to it, load1,
+    /// and the daemon's uptime.
+    #[tokio::test]
+    async fn health_probe_restart_records_rule_probes_and_load() {
+        let dir = temp_repo_dir("shell-exec-why-health");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let log = dir.join("restarts.jsonl");
+
+        let mut exec = Exec::new(ExecConfig {
+            watch: None,
+            exec: vec!["sleep 300".to_string()],
+            restart: None,
+            health: Some(HealthCheck {
+                url: None,
+                command: Some("exit 3".to_string()),
+                interval_secs: 1,
+                timeout_secs: 1,
+                failure_threshold: 2,
+            }),
+        });
+        exec.restart_log = Some(log.clone());
+
+        let runner = tokio::spawn({
+            let exec = exec.clone();
+            async move { exec.run().await }
+        });
+        tokio::time::sleep(Duration::from_millis(3500)).await;
+        exec.shutdown().await;
+        let _ = runner.await.expect("join run task");
+
+        let records = read_restart_records(&log);
+        assert!(!records.is_empty(), "a probe restart must leave a record");
+        let r = &records[0];
+        assert_eq!(r["event"], "worker.restart");
+        assert_eq!(r["rule"], "health_probe");
+        assert_eq!(r["worker"], "sleep 300");
+        let probes = r["last_probes"].as_array().expect("last_probes array");
+        assert_eq!(probes.len(), 2, "one entry per failed probe: {r}");
+        assert!(probes.iter().all(|p| p == "exit 3"), "probe results: {r}");
+        assert!(r["load1"].is_number(), "load1 recorded: {r}");
+        assert!(r["uptime_s"].is_number(), "uptime recorded: {r}");
+        assert!(r["ts"].is_string(), "timestamp recorded: {r}");
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// A probe that hits its timeout is recorded as a timeout, not as a plain
+    /// failure: at load1 56 that is the difference between "voice was hung" and
+    /// "curl was starved".
+    #[tokio::test]
+    async fn health_probe_timeout_is_named_in_the_record() {
+        let dir = temp_repo_dir("shell-exec-why-timeout");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let log = dir.join("restarts.jsonl");
+
+        let mut exec = Exec::new(ExecConfig {
+            watch: None,
+            exec: vec!["sleep 300".to_string()],
+            restart: None,
+            health: Some(HealthCheck {
+                url: None,
+                command: Some("sleep 30".to_string()),
+                interval_secs: 1,
+                timeout_secs: 1,
+                failure_threshold: 1,
+            }),
+        });
+        exec.restart_log = Some(log.clone());
+
+        let runner = tokio::spawn({
+            let exec = exec.clone();
+            async move { exec.run().await }
+        });
+        tokio::time::sleep(Duration::from_millis(3500)).await;
+        exec.shutdown().await;
+        let _ = runner.await.expect("join run task");
+
+        let records = read_restart_records(&log);
+        assert!(!records.is_empty(), "a probe restart must leave a record");
+        assert_eq!(records[0]["last_probes"][0], "timeout after 1s");
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// A crash restart records the exit status and the rule `exit`.
+    #[tokio::test]
+    async fn exit_restart_records_rule_and_status() {
+        let dir = temp_repo_dir("shell-exec-why-exit");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let log = dir.join("restarts.jsonl");
+
+        let mut exec = Exec::new(ExecConfig {
+            watch: None,
+            exec: vec!["exit 7".to_string()],
+            restart: Some(RestartPolicy {
+                on_crash: true,
+                backoff_secs: 0,
+                max_backoff_secs: 0,
+            }),
+            health: None,
+        });
+        exec.restart_log = Some(log.clone());
+
+        let runner = tokio::spawn({
+            let exec = exec.clone();
+            async move { exec.run().await }
+        });
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        exec.shutdown().await;
+        let _ = runner.await.expect("join run task");
+
+        let records = read_restart_records(&log);
+        assert!(!records.is_empty(), "a crash restart must leave a record");
+        let r = &records[0];
+        assert_eq!(r["rule"], "exit");
+        assert_eq!(r["exit_code"], 7);
+        assert!(r["uptime_s"].is_number(), "uptime recorded: {r}");
+        assert!(r["load1"].is_number(), "load1 recorded: {r}");
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// Healthy probes never restart, so they never write a record.
+    #[tokio::test]
+    async fn passing_probe_writes_no_restart_record() {
+        let dir = temp_repo_dir("shell-exec-why-quiet");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let log = dir.join("restarts.jsonl");
+
+        let mut exec = Exec::new(ExecConfig {
+            watch: None,
+            exec: vec!["sleep 300".to_string()],
+            restart: None,
+            health: Some(HealthCheck {
+                url: None,
+                command: Some("true".to_string()),
+                interval_secs: 1,
+                timeout_secs: 1,
+                failure_threshold: 1,
+            }),
+        });
+        exec.restart_log = Some(log.clone());
+
+        let runner = tokio::spawn({
+            let exec = exec.clone();
+            async move { exec.run().await }
+        });
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        exec.shutdown().await;
+        let _ = runner.await.expect("join run task");
+
+        assert!(read_restart_records(&log).is_empty());
 
         fs::remove_dir_all(dir).ok();
     }
