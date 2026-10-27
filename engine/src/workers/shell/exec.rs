@@ -117,6 +117,7 @@ impl Exec {
         };
         let res = path
             .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
             .map_or(Ok(()), std::fs::create_dir_all)
             .and_then(|()| {
                 use std::io::Write;
@@ -348,6 +349,7 @@ impl Exec {
                         started_at = std::time::Instant::now();
                         backoff = plan.next_backoff;
                         health_failures = 0;
+                        failed_probes.clear();
                     }
                 }
                 // 2. Health probe tick.
@@ -424,6 +426,7 @@ impl Exec {
                         backoff = init_backoff;
                         started_at = std::time::Instant::now();
                         health_failures = 0;
+                        failed_probes.clear();
                     }
                 }
                 // 4. Shutdown.
@@ -1448,6 +1451,77 @@ mod tests {
         assert!(r["load1"].is_number(), "load1 recorded: {r}");
 
         fs::remove_dir_all(dir).ok();
+    }
+
+    /// A crash restart ends the failure streak: a later probe restart must not
+    /// list probe failures from the daemon generation that already died.
+    #[tokio::test]
+    async fn crash_restart_clears_earlier_probe_failures() {
+        let dir = temp_repo_dir("shell-exec-why-stale");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let log = dir.join("restarts.jsonl");
+        let marker = dir.join("spawns.log");
+
+        // First generation exits after ~1.5s, between probe 1 and probe 2.
+        // Later generations stay up so the probe restart can follow.
+        let daemon = format!(
+            "echo x >> {m}; if [ $(wc -l < {m}) -le 1 ]; then sleep 1.5; exit 1; else sleep 300; fi",
+            m = marker.display()
+        );
+        let mut exec = Exec::new(ExecConfig {
+            watch: None,
+            exec: vec![daemon],
+            restart: Some(RestartPolicy {
+                on_crash: true,
+                backoff_secs: 0,
+                max_backoff_secs: 0,
+            }),
+            health: Some(HealthCheck {
+                url: None,
+                command: Some("exit 3".to_string()),
+                interval_secs: 1,
+                timeout_secs: 1,
+                failure_threshold: 2,
+            }),
+        });
+        exec.restart_log = Some(log.clone());
+
+        let runner = tokio::spawn({
+            let exec = exec.clone();
+            async move { exec.run().await }
+        });
+        tokio::time::sleep(Duration::from_millis(5500)).await;
+        exec.shutdown().await;
+        let _ = runner.await.expect("join run task");
+
+        let records = read_restart_records(&log);
+        let probe = records
+            .iter()
+            .find(|r| r["rule"] == "health_probe")
+            .expect("a probe restart follows the crash restart");
+        assert_eq!(
+            probe["last_probes"].as_array().map(Vec::len),
+            Some(2),
+            "only the current generation's probes: {probe}"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// A bare relative log filename has an empty parent; it must still be written.
+    #[tokio::test]
+    async fn relative_restart_log_path_is_written() {
+        let name = format!(".tmp-restart-rel-{}.jsonl", uuid::Uuid::new_v4());
+        let mut exec = Exec::new(ExecConfig {
+            watch: None,
+            exec: vec![],
+            ..Default::default()
+        });
+        exec.restart_log = Some(std::path::PathBuf::from(&name));
+        exec.record_restart("d", "exit", Duration::from_secs(1), serde_json::json!({}));
+        let got = read_restart_records(Path::new(&name));
+        fs::remove_file(&name).ok();
+        assert_eq!(got.len(), 1);
     }
 
     /// Healthy probes never restart, so they never write a record.
