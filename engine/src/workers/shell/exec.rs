@@ -934,7 +934,8 @@ mod tests {
     /// (a reader refuses such a record).
     #[tokio::test]
     async fn pid_record_names_the_stanza_that_spawned_it() {
-        let dir = temp_repo_dir("pid-dir-name");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().to_path_buf();
         let mut exec = Exec::new(ExecConfig {
             watch: None,
             exec: vec!["sleep 300".to_string()],
@@ -959,7 +960,8 @@ mod tests {
 
     #[tokio::test]
     async fn pid_record_without_a_stanza_has_no_name_key() {
-        let dir = temp_repo_dir("pid-dir-noname");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().to_path_buf();
         let mut exec = Exec::new(ExecConfig {
             watch: None,
             exec: vec!["sleep 300".to_string()],
@@ -981,7 +983,8 @@ mod tests {
 
     #[tokio::test]
     async fn every_spawn_records_its_pid_for_the_host_reaper() {
-        let dir = temp_repo_dir("pid-dir");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().to_path_buf();
         let mut exec = Exec::new(ExecConfig {
             watch: None,
             exec: vec!["sleep 300".to_string()],
