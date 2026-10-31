@@ -82,3 +82,6 @@ TODOS.md
 # Per-contributor coding-agent state (not tracked)
 .serena/
 CLAUDE.md
+
+# Test leftovers (tests now use tempfile; belt and braces)
+.tmp-*/

@@ -39,6 +39,10 @@ impl Service<Request<Body>> for HotRouter {
     }
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
+        if crate::workers::origin_guard::is_browser_request(req.headers()) {
+            let refused = crate::workers::origin_guard::refusal(req.uri().path());
+            return Box::pin(async move { Ok(refused) });
+        }
         let router_arc = self.inner.clone();
         let engine = self.engine.clone();
         Box::pin(async move {

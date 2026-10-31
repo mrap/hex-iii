@@ -20,6 +20,11 @@ pub struct ExecConfig {
     /// the daemon is never probed.
     #[serde(default)]
     pub health: Option<HealthCheck>,
+    /// The entry name from engine-workers.yaml. The engine overwrites this
+    /// on every create (`WorkerEntry::create_worker`), so a stanza cannot
+    /// claim another stanza's name. Recorded in each pid record.
+    #[serde(default)]
+    pub stanza: Option<String>,
 }
 
 /// Respawn the long-lived command when it exits, with exponential backoff.

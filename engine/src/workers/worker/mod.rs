@@ -128,7 +128,10 @@ impl Worker for WorkerManager {
             .route("/", get(ws_handler))
             .route("/otel", get(otel_ws_handler))
             .route("/ws/channels/{channel_id}", get(channel_ws_upgrade))
-            .with_state(state);
+            .with_state(state)
+            .layer(axum::middleware::from_fn(
+                crate::workers::origin_guard::refuse_browser_origin,
+            ));
 
         let handle = tokio::spawn(async move {
             let shutdown = async move {

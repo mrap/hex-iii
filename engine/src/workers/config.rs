@@ -407,6 +407,21 @@ impl WorkerEntry {
         self.name.split('#').next().unwrap_or(&self.name)
     }
 
+    /// The config handed to the worker factory. For `iii-exec` the entry
+    /// name is written into `config.stanza`, replacing anything the stanza's
+    /// own config set, so a pid record always names the stanza that really
+    /// spawned it (issuerstanza1102).
+    pub(crate) fn factory_config(&self) -> Option<Value> {
+        if self.worker_type() != "iii-exec" {
+            return self.config.clone();
+        }
+        let mut cfg = self.config.clone().unwrap_or_else(|| serde_json::json!({}));
+        if let Some(obj) = cfg.as_object_mut() {
+            obj.insert("stanza".to_string(), Value::String(self.name.clone()));
+        }
+        Some(cfg)
+    }
+
     /// Creates a module instance from this entry
     pub async fn create_worker(
         &self,
@@ -418,7 +433,7 @@ impl WorkerEntry {
                 self.worker_type(),
                 self.image.as_deref(),
                 engine,
-                self.config.clone(),
+                self.factory_config(),
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create {}: {}", self.name, e))
@@ -909,6 +924,32 @@ impl Default for EngineBuilder {
 #[cfg(test)]
 #[allow(deprecated)]
 mod tests {
+    /// issuerstanza1102: the engine, not the stanza, decides the recorded name.
+    #[test]
+    fn iii_exec_factory_config_carries_the_entry_name_and_overrides_a_forged_one() {
+        let entry = WorkerEntry {
+            name: "hex-voice-server".to_string(),
+            kind: Some("iii-exec".to_string()),
+            config: Some(serde_json::json!({"exec": ["true"], "stanza": "other"})),
+            ..Default::default()
+        };
+        let cfg = entry.factory_config().unwrap();
+        assert_eq!(cfg["stanza"], "hex-voice-server");
+        assert_eq!(cfg["exec"], serde_json::json!(["true"]));
+        let bare = WorkerEntry {
+            name: "x".to_string(),
+            kind: Some("iii-exec".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(bare.factory_config().unwrap()["stanza"], "x");
+        let other = WorkerEntry {
+            name: "iii-http".to_string(),
+            config: Some(serde_json::json!({"a": 1})),
+            ..Default::default()
+        };
+        assert_eq!(other.factory_config(), Some(serde_json::json!({"a": 1})));
+    }
+
     use super::*;
 
     /// `type` selects the factory while `name` stays a unique semantic
