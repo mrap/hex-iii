@@ -58,6 +58,11 @@ pub struct Exec {
     /// record; the stderr line is written either way. (restartwhy1022: the
     /// reason lived only in `tracing` events, which the host never prints.)
     restart_log: Option<std::path::PathBuf>,
+    /// The engine-workers.yaml entry name this daemon runs for. Written into
+    /// every pid record so a host can tell which stanza owns a pid
+    /// (issuerstanza1102). Set by the engine from the entry, never by the
+    /// stanza's own config. None only for a hand-built `Exec` in tests.
+    stanza: Option<String>,
 }
 
 /// Env var naming the pid record directory (see `Exec::pid_dir`).
@@ -96,6 +101,7 @@ impl Exec {
             restart_log: std::env::var_os(RESTART_LOG_ENV)
                 .filter(|v| !v.is_empty())
                 .map(std::path::PathBuf::from),
+            stanza: config.stanza,
         }
     }
 
@@ -144,7 +150,11 @@ impl Exec {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let body = format!("{{\"pid\":{pid},\"started_unix\":{started}}}\n");
+        let mut rec = serde_json::json!({"pid": pid, "started_unix": started});
+        if let Some(name) = &self.stanza {
+            rec["name"] = serde_json::Value::String(name.clone());
+        }
+        let body = format!("{rec}\n");
         let path = dir.join(format!("exec-{pid}.json"));
         let tmp = dir.join(format!(".exec-{pid}.json.tmp"));
         let res = std::fs::create_dir_all(dir)
@@ -918,6 +928,57 @@ mod tests {
     /// foundation-fixes 2026-10-06 (a voice outage): every spawn,
     /// first or respawn, leaves a pid record the host can reap after the
     /// engine is aborted or killed.
+    /// issuerstanza1102: a pid record names the stanza that spawned it, so a
+    /// host can ask "which pid is hex-voice-server's" and not guess by
+    /// command line. A hand-built Exec with no stanza writes no `name` key
+    /// (a reader refuses such a record).
+    #[tokio::test]
+    async fn pid_record_names_the_stanza_that_spawned_it() {
+        let dir = temp_repo_dir("pid-dir-name");
+        let mut exec = Exec::new(ExecConfig {
+            watch: None,
+            exec: vec!["sleep 300".to_string()],
+            stanza: Some("hex-voice-server".to_string()),
+            ..Default::default()
+        });
+        exec.pid_dir = Some(dir.clone());
+        let child = exec.spawn_single(&exec.exec[0]).unwrap();
+        let pid = child.id().unwrap();
+        let rec: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.join(format!("exec-{pid}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rec["name"], "hex-voice-server", "{rec}");
+        assert_eq!(rec["pid"], pid);
+        assert!(rec["started_unix"].as_u64().is_some(), "{rec}");
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+
+    #[tokio::test]
+    async fn pid_record_without_a_stanza_has_no_name_key() {
+        let dir = temp_repo_dir("pid-dir-noname");
+        let mut exec = Exec::new(ExecConfig {
+            watch: None,
+            exec: vec!["sleep 300".to_string()],
+            ..Default::default()
+        });
+        exec.pid_dir = Some(dir.clone());
+        let child = exec.spawn_single(&exec.exec[0]).unwrap();
+        let pid = child.id().unwrap();
+        let rec: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.join(format!("exec-{pid}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert!(rec.get("name").is_none(), "{rec}");
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+
     #[tokio::test]
     async fn every_spawn_records_its_pid_for_the_host_reaper() {
         let dir = temp_repo_dir("pid-dir");
@@ -1049,6 +1110,7 @@ mod tests {
         let marker = dir.join("spawns.log");
 
         let exec = Exec::new(ExecConfig {
+            stanza: None,
             watch: None,
             exec: vec![format!("echo x >> {}; exit 1", marker.display())],
             restart: Some(RestartPolicy {
@@ -1190,6 +1252,7 @@ mod tests {
         );
 
         let mut exec = Exec::new(ExecConfig {
+            stanza: None,
             watch: None,
             exec: vec![script],
             restart: Some(RestartPolicy {
@@ -1286,6 +1349,7 @@ mod tests {
         let marker = dir.join("spawns.log");
 
         let exec = Exec::new(ExecConfig {
+            stanza: None,
             watch: None,
             exec: vec![format!("echo x >> {}; sleep 300", marker.display())],
             restart: None,
@@ -1340,6 +1404,7 @@ mod tests {
         let log = dir.join("restarts.jsonl");
 
         let mut exec = Exec::new(ExecConfig {
+            stanza: None,
             watch: None,
             exec: vec!["sleep 300".to_string()],
             restart: None,
@@ -1387,6 +1452,7 @@ mod tests {
         let log = dir.join("restarts.jsonl");
 
         let mut exec = Exec::new(ExecConfig {
+            stanza: None,
             watch: None,
             exec: vec!["sleep 300".to_string()],
             restart: None,
@@ -1423,6 +1489,7 @@ mod tests {
         let log = dir.join("restarts.jsonl");
 
         let mut exec = Exec::new(ExecConfig {
+            stanza: None,
             watch: None,
             exec: vec!["exit 7".to_string()],
             restart: Some(RestartPolicy {
@@ -1469,6 +1536,7 @@ mod tests {
             m = marker.display()
         );
         let mut exec = Exec::new(ExecConfig {
+            stanza: None,
             watch: None,
             exec: vec![daemon],
             restart: Some(RestartPolicy {
@@ -1532,6 +1600,7 @@ mod tests {
         let log = dir.join("restarts.jsonl");
 
         let mut exec = Exec::new(ExecConfig {
+            stanza: None,
             watch: None,
             exec: vec!["sleep 300".to_string()],
             restart: None,
