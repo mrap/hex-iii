@@ -656,6 +656,9 @@ impl Exec {
             // 2️⃣ Wait a bit
             let exited = timeout(Duration::from_secs(3), child.wait()).await;
 
+            // Only a confirmed reap clears the record; a child whose wait
+            // failed may still run, and the host reaper needs its record.
+            let mut reaped = matches!(exited, Ok(Ok(_)));
             if exited.is_err() {
                 // 3️⃣ Force kill the entire process group
                 tracing::warn!("Process did not exit gracefully, killing");
@@ -669,9 +672,13 @@ impl Exec {
                 }
 
                 // Reap the child to avoid zombie processes
-                let _ = child.wait().await;
+                reaped = child.wait().await.is_ok();
             }
-            self.clear_pid(pid);
+            if reaped {
+                self.clear_pid(pid);
+            } else {
+                tracing::error!("exec: child {pid:?} not confirmed reaped; keeping its pid record");
+            }
         }
     }
 
@@ -702,8 +709,12 @@ impl Exec {
             }
 
             // Reap the direct child to avoid zombies
-            let _ = proc.wait().await;
-            self.clear_pid(pid);
+            match proc.wait().await {
+                Ok(_) => self.clear_pid(pid),
+                Err(e) => tracing::error!(
+                    "exec: wait on killed child {pid:?} failed ({e}); keeping its pid record"
+                ),
+            }
         }
     }
 }
@@ -1155,11 +1166,14 @@ mod tests {
     /// Uses a process that traps SIGTERM so the graceful path always times out.
     #[tokio::test]
     async fn stop_process_reaps_child_after_sigkill() {
-        let exec = Exec::new(ExecConfig {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut exec = Exec::new(ExecConfig {
             watch: None,
             exec: vec!["trap '' TERM; sleep 300".to_string()],
             ..Default::default()
         });
+        // execpidstale1101: the forced (SIGKILL) stop path clears its record too.
+        exec.pid_dir = Some(tmp.path().to_path_buf());
 
         let child = exec.spawn_single(&exec.exec[0]).unwrap();
         let child_pid = child.id().unwrap() as i32;
@@ -1180,6 +1194,8 @@ mod tests {
             child_pid,
             pids_after
         );
+        let rec = tmp.path().join(format!("exec-{child_pid}.json"));
+        assert!(!rec.exists(), "SIGKILL path left {}", rec.display());
     }
 
     /// Calling shutdown() twice must not panic or error.
