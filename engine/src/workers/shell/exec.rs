@@ -69,6 +69,9 @@ pub struct Exec {
     fail_spawns: Arc<std::sync::atomic::AtomicU32>,
     #[cfg(test)]
     spawn_calls: Arc<std::sync::atomic::AtomicU32>,
+    /// Test seam: the first N `spawn_single` calls fail, including the very first.
+    #[cfg(test)]
+    fail_first_spawns: Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// Env var naming the pid record directory (see `Exec::pid_dir`).
@@ -112,6 +115,8 @@ impl Exec {
             fail_spawns: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             #[cfg(test)]
             spawn_calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            #[cfg(test)]
+            fail_first_spawns: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -216,7 +221,16 @@ impl Exec {
         let cwd = std::env::current_dir().unwrap_or_default();
 
         // 🔥 start pipeline
-        self.run_pipeline().await?;
+        let mut first_start_failed = false;
+        if let Err(e) = self.run_pipeline().await {
+            if self.restart.is_none() && self.health.is_none() {
+                return Err(e);
+            }
+            // A supervised stanza never gives up: supervise() retries the
+            // whole pipeline with backoff (svcdownalert1107).
+            tracing::error!("exec first start failed, supervisor will retry: {e}");
+            first_start_failed = true;
+        }
 
         let mut shutdown_rx = self.shutdown_rx.clone();
 
@@ -224,7 +238,8 @@ impl Exec {
         // probe its health alongside the file-watcher. Without restart/health
         // this block is skipped and the legacy watch/shutdown loop runs as-is.
         if self.restart.is_some() || self.health.is_some() {
-            self.supervise(rx, shutdown_rx, &cwd).await;
+            self.supervise(rx, shutdown_rx, &cwd, first_start_failed)
+                .await;
             return Ok(());
         }
 
@@ -274,6 +289,7 @@ impl Exec {
         mut rx: mpsc::Receiver<Event>,
         mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
         cwd: &Path,
+        first_start_failed: bool,
     ) {
         // The daemon is the last pipeline command (already spawned by
         // run_pipeline, sitting in self.child). Respawns re-run ONLY this
@@ -320,6 +336,13 @@ impl Exec {
         // gives up (svcdownalert1107: a failed spawn used to leave no child and
         // nothing to notice it).
         let mut retry_spawn_at: Option<std::time::Instant> = None;
+        // True when the retry must re-run the whole pipeline (first start or a
+        // file-watch restart failed) rather than only the daemon command.
+        let mut retry_full_pipeline = false;
+        if first_start_failed {
+            retry_spawn_at = Some(self.note_spawn_failure(&daemon_cmd, &mut backoff));
+            retry_full_pipeline = true;
+        }
         // Results of the probes in the current failure streak, oldest first.
         let mut failed_probes: Vec<String> = Vec::new();
 
@@ -381,10 +404,21 @@ impl Exec {
                         && std::time::Instant::now() >= at
                         && self.child.lock().await.is_none()
                     {
-                        // A earlier respawn failed to start: try again.
-                        if let Some(child) = self.respawn(&daemon_cmd).await {
+                        // An earlier start failed: try again.
+                        let started = if retry_full_pipeline {
+                            if let Err(e) = self.run_pipeline().await {
+                                tracing::error!("pipeline retry failed: {e}");
+                            }
+                            self.child.lock().await.is_some()
+                        } else if let Some(child) = self.respawn(&daemon_cmd).await {
                             *self.child.lock().await = Some(child);
+                            true
+                        } else {
+                            false
+                        };
+                        if started {
                             retry_spawn_at = None;
+                            retry_full_pipeline = false;
                             started_at = std::time::Instant::now();
                         } else {
                             retry_spawn_at = Some(self.note_spawn_failure(&daemon_cmd, &mut backoff));
@@ -393,7 +427,9 @@ impl Exec {
                 }
                 // 2. Health probe tick.
                 _ = tick_opt(&mut health_timer) => {
-                    if let Some(h) = &self.health {
+                    if retry_spawn_at.is_some() && self.child.lock().await.is_none() {
+                        // No process to probe; the retry timer owns the restart.
+                    } else if let Some(h) = &self.health {
                         let outcome = probe_health(h).await;
                         if outcome.is_ok() {
                             health_failures = 0;
@@ -424,6 +460,8 @@ impl Exec {
                                 self.kill_process().await;
                                 if let Some(child) = self.respawn(&daemon_cmd).await {
                                     *self.child.lock().await = Some(child);
+                                    retry_spawn_at = None;
+                                    retry_full_pipeline = false;
                                 } else {
                                     retry_spawn_at = Some(self.note_spawn_failure(&daemon_cmd, &mut backoff));
                                 }
@@ -465,6 +503,13 @@ impl Exec {
                             tracing::error!("pipeline restart failed: {e}");
                         }
                         backoff = init_backoff;
+                        if self.child.lock().await.is_some() {
+                            retry_spawn_at = None;
+                            retry_full_pipeline = false;
+                        } else {
+                            retry_spawn_at = Some(self.note_spawn_failure(&daemon_cmd, &mut backoff));
+                            retry_full_pipeline = true;
+                        }
                         started_at = std::time::Instant::now();
                         health_failures = 0;
                         failed_probes.clear();
@@ -510,14 +555,14 @@ impl Exec {
     fn note_spawn_failure(&self, daemon_cmd: &str, backoff: &mut u64) -> std::time::Instant {
         let init = self.restart.as_ref().map_or(0, |r| r.backoff_secs);
         let max = self.restart.as_ref().map_or(0, |r| r.max_backoff_secs);
-        let wait = if *backoff == 0 { init } else { *backoff };
+        let (wait, next) = spawn_retry_delay(*backoff, init, max);
         self.record_restart(
             daemon_cmd,
             "spawn_failed",
             Duration::ZERO,
             serde_json::json!({ "backoff_s": wait }),
         );
-        *backoff = next_backoff(wait, init, max);
+        *backoff = next;
         std::time::Instant::now() + Duration::from_secs(wait)
     }
 
@@ -582,6 +627,11 @@ impl Exec {
         {
             use std::sync::atomic::Ordering::SeqCst;
             let n = self.spawn_calls.fetch_add(1, SeqCst);
+            let first_left = self.fail_first_spawns.load(SeqCst);
+            if first_left > 0 {
+                self.fail_first_spawns.store(first_left - 1, SeqCst);
+                anyhow::bail!("injected first-spawn failure");
+            }
             let left = self.fail_spawns.load(SeqCst);
             if n >= 1 && left > 0 {
                 self.fail_spawns.store(left - 1, SeqCst);
@@ -748,6 +798,22 @@ async fn tick_opt(timer: &mut Option<tokio::time::Interval>) {
         }
         None => std::future::pending().await,
     }
+}
+
+/// Longest wait between spawn retries when the config sets no cap.
+const MAX_SPAWN_RETRY_SECS: u64 = 300;
+
+/// Wait before the next spawn retry, and the delay to carry forward. The wait
+/// is at least 1 s (no hot loop on a zero backoff) and never exceeds the cap
+/// (the configured max, or 300 s when the config sets none).
+fn spawn_retry_delay(backoff: u64, initial: u64, max: u64) -> (u64, u64) {
+    let cap = if max == 0 {
+        MAX_SPAWN_RETRY_SECS
+    } else {
+        max.max(1)
+    };
+    let wait = (if backoff == 0 { initial } else { backoff }).clamp(1, cap);
+    (wait, wait.saturating_mul(2).min(cap))
 }
 
 /// Next exponential backoff: double the current delay, clamped to
@@ -1249,6 +1315,57 @@ mod tests {
             spawns >= 2,
             "supervisor gave up after a failed spawn: {spawns} start(s)"
         );
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// Review finding on 3ecff4c2: a zero backoff made the spawn retry fire on
+    /// every 200 ms poll tick, and max 0 let the delay grow without a bound.
+    #[test]
+    fn spawn_retry_delay_is_floored_and_capped() {
+        // zero config: floor of 1 s, never a hot loop
+        assert_eq!(spawn_retry_delay(0, 0, 0), (1, 2));
+        // doubling keeps going to the default cap, then stops there
+        assert_eq!(spawn_retry_delay(200, 5, 0), (200, 300));
+        assert_eq!(spawn_retry_delay(300, 5, 0), (300, 300));
+        assert_eq!(spawn_retry_delay(u64::MAX, 5, 0), (300, 300));
+        // an explicit cap wins
+        assert_eq!(spawn_retry_delay(4, 1, 4), (4, 4));
+    }
+
+    /// Review finding on 3ecff4c2: when the very first spawn failed, run()
+    /// returned an error, nothing restarted the worker, and the stanza stayed
+    /// down with no retry. A supervised stanza must keep retrying instead.
+    #[tokio::test]
+    async fn failed_first_spawn_is_retried_for_supervised_stanza() {
+        let dir = temp_repo_dir("shell-exec-firstspawnfail");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let marker = dir.join("spawns.log");
+        let mut exec = Exec::new(ExecConfig {
+            stanza: None,
+            watch: None,
+            exec: vec![format!("echo x >> {}; sleep 30", marker.display())],
+            restart: Some(RestartPolicy {
+                on_crash: true,
+                backoff_secs: 1,
+                max_backoff_secs: 2,
+            }),
+            health: None,
+        });
+        exec.healthy_floor_secs = 0;
+        exec.fail_first_spawns
+            .store(2, std::sync::atomic::Ordering::SeqCst);
+        let runner = tokio::spawn({
+            let exec = exec.clone();
+            async move { exec.run().await }
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let started = marker.exists();
+        exec.shutdown().await;
+        let _ = runner.await.expect("join run task");
+        assert!(started, "stanza never started after a failed first spawn");
         fs::remove_dir_all(dir).ok();
     }
 
