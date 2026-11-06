@@ -180,6 +180,21 @@ impl Exec {
         }
     }
 
+    /// Remove the record of a child this Exec has reaped (execpidstale1101:
+    /// a stale record made a host glob reader report a false NO_RESPAWN). A
+    /// missing record is fine; any other failure is logged at error level.
+    fn clear_pid(&self, pid: Option<u32>) {
+        let (Some(dir), Some(pid)) = (&self.pid_dir, pid) else {
+            return;
+        };
+        let path = dir.join(format!("exec-{pid}.json"));
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::error!("exec: could not remove pid record {}: {e}", path.display()),
+        }
+    }
+
     /// Signal all loops in run()/run_pipeline() to stop, then kill the child process.
     pub async fn shutdown(&self) {
         if self.shutdown_called.swap(true, Ordering::SeqCst) {
@@ -532,13 +547,18 @@ impl Exec {
     async fn take_if_exited(&self) -> Option<std::process::ExitStatus> {
         let mut guard = self.child.lock().await;
         match guard.take() {
-            Some(mut child) => match child.try_wait() {
-                Ok(Some(status)) => Some(status), // exited & reaped; leave slot empty
-                Ok(None) => {
+            // tokio forgets the id once the child is reaped, so read it first.
+            Some(mut child) => match (child.id(), child.try_wait()) {
+                (pid, Ok(Some(status))) => {
+                    // exited & reaped; leave slot empty
+                    self.clear_pid(pid);
+                    Some(status)
+                }
+                (_, Ok(None)) => {
                     *guard = Some(child); // still running; put it back
                     None
                 }
-                Err(e) => {
+                (_, Err(e)) => {
                     tracing::warn!("try_wait on exec daemon failed: {e}");
                     *guard = Some(child);
                     None
@@ -597,6 +617,7 @@ impl Exec {
                 // Take child out of the mutex so we don't hold the lock during wait.
                 // This allows stop_process()/shutdown() to proceed if called concurrently.
                 let mut child = self.child.lock().await.take().unwrap();
+                let step_pid = child.id();
 
                 // Wait for command to finish OR shutdown signal
                 let status = tokio::select! {
@@ -612,6 +633,7 @@ impl Exec {
                     }
                 };
 
+                self.clear_pid(step_pid);
                 if !status.success() {
                     tracing::error!("Pipeline step failed, aborting pipeline");
                     break;
@@ -705,8 +727,9 @@ impl Exec {
 
     pub async fn stop_process(&self) {
         if let Some(mut child) = self.child.lock().await.take() {
+            let pid = child.id();
             #[cfg(not(windows))]
-            let pgid = child.id().map(|id| nix::unistd::Pid::from_raw(id as i32));
+            let pgid = pid.map(|id| nix::unistd::Pid::from_raw(id as i32));
 
             #[cfg(not(windows))]
             if let Some(pgid) = pgid {
@@ -741,6 +764,9 @@ impl Exec {
             // 2️⃣ Wait a bit
             let exited = timeout(Duration::from_secs(3), child.wait()).await;
 
+            // Only a confirmed reap clears the record; a child whose wait
+            // failed may still run, and the host reaper needs its record.
+            let mut reaped = matches!(exited, Ok(Ok(_)));
             if exited.is_err() {
                 // 3️⃣ Force kill the entire process group
                 tracing::warn!("Process did not exit gracefully, killing");
@@ -754,13 +780,19 @@ impl Exec {
                 }
 
                 // Reap the child to avoid zombie processes
-                let _ = child.wait().await;
+                reaped = child.wait().await.is_ok();
+            }
+            if reaped {
+                self.clear_pid(pid);
+            } else {
+                tracing::error!("exec: child {pid:?} not confirmed reaped; keeping its pid record");
             }
         }
     }
 
     async fn kill_process(&self) {
         if let Some(mut proc) = self.child.lock().await.take() {
+            let pid = proc.id();
             #[cfg(not(windows))]
             {
                 if let Some(id) = proc.id() {
@@ -785,7 +817,12 @@ impl Exec {
             }
 
             // Reap the direct child to avoid zombies
-            let _ = proc.wait().await;
+            match proc.wait().await {
+                Ok(_) => self.clear_pid(pid),
+                Err(e) => tracing::error!(
+                    "exec: wait on killed child {pid:?} failed ({e}); keeping its pid record"
+                ),
+            }
         }
     }
 }
@@ -1141,6 +1178,79 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// execpidstale1101 (concierge-bridge, 11-01): a child this Exec reaped
+    /// left its exec-<pid>.json behind, so a host glob read a dead pid and
+    /// reported a false NO_RESPAWN. Every reap path removes the record.
+    #[tokio::test]
+    async fn reaped_child_leaves_no_pid_record() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().to_path_buf();
+        let mut exec = Exec::new(ExecConfig {
+            watch: None,
+            exec: vec!["sleep 300".to_string()],
+            ..Default::default()
+        });
+        exec.pid_dir = Some(dir.clone());
+        let rec = |pid: u32| dir.join(format!("exec-{pid}.json"));
+
+        // Crash path: the daemon exits by itself and the supervisor reaps it.
+        let quick = exec.spawn_single("exit 3").unwrap();
+        let pid = quick.id().unwrap();
+        *exec.child.lock().await = Some(quick);
+        assert!(rec(pid).exists());
+        let mut status = None;
+        for _ in 0..50 {
+            status = exec.take_if_exited().await;
+            if status.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(status.is_some(), "child never reaped");
+        assert!(!rec(pid).exists(), "crash path left {}", rec(pid).display());
+
+        // Kill path (file change and health restarts).
+        let child = exec.spawn_single(&exec.exec[0]).unwrap();
+        let pid = child.id().unwrap();
+        *exec.child.lock().await = Some(child);
+        exec.kill_process().await;
+        assert!(!rec(pid).exists(), "kill path left {}", rec(pid).display());
+
+        // Stop path (shutdown).
+        let child = exec.spawn_single(&exec.exec[0]).unwrap();
+        let pid = child.id().unwrap();
+        *exec.child.lock().await = Some(child);
+        exec.stop_process().await;
+        assert!(!rec(pid).exists(), "stop path left {}", rec(pid).display());
+    }
+
+    /// A pipeline step that finishes removes its own record too.
+    #[tokio::test]
+    async fn finished_pipeline_step_leaves_no_pid_record() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().to_path_buf();
+        let mut exec = Exec::new(ExecConfig {
+            watch: None,
+            exec: vec!["true".to_string(), "sleep 300".to_string()],
+            ..Default::default()
+        });
+        exec.pid_dir = Some(dir.clone());
+        exec.run_pipeline().await.unwrap();
+        let left: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("exec-"))
+            .collect();
+        assert_eq!(
+            left.len(),
+            1,
+            "only the running last step keeps a record: {left:?}"
+        );
+        exec.kill_process().await;
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
     /// Same test but for kill_process() (the file-change restart path).
     #[tokio::test]
     async fn kill_process_kills_entire_process_group() {
@@ -1180,11 +1290,14 @@ mod tests {
     /// Uses a process that traps SIGTERM so the graceful path always times out.
     #[tokio::test]
     async fn stop_process_reaps_child_after_sigkill() {
-        let exec = Exec::new(ExecConfig {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut exec = Exec::new(ExecConfig {
             watch: None,
             exec: vec!["trap '' TERM; sleep 300".to_string()],
             ..Default::default()
         });
+        // execpidstale1101: the forced (SIGKILL) stop path clears its record too.
+        exec.pid_dir = Some(tmp.path().to_path_buf());
 
         let child = exec.spawn_single(&exec.exec[0]).unwrap();
         let child_pid = child.id().unwrap() as i32;
@@ -1205,6 +1318,8 @@ mod tests {
             child_pid,
             pids_after
         );
+        let rec = tmp.path().join(format!("exec-{child_pid}.json"));
+        assert!(!rec.exists(), "SIGKILL path left {}", rec.display());
     }
 
     /// Calling shutdown() twice must not panic or error.
