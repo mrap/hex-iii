@@ -1861,6 +1861,131 @@ mod tests {
         fs::remove_dir_all(dir).ok();
     }
 
+    /// Non-empty lines in a marker file; a missing file counts as zero.
+    fn marker_lines(path: &Path) -> usize {
+        fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
+
+    /// Time from the daemon's second spawn to the first probe after it. The test
+    /// process watches both files, so a slow box can only make the spawn look
+    /// later (a smaller gap); the assert floors sit well under the interval.
+    async fn gap_from_respawn_to_next_probe(spawns: &Path, probes: &Path) -> Duration {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while marker_lines(spawns) < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "daemon never respawned"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let respawned_at = std::time::Instant::now();
+        let probes_before = marker_lines(probes);
+        while marker_lines(probes) <= probes_before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no probe after the respawn"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        respawned_at.elapsed()
+    }
+
+    /// Incident probegrace1113 (hexhome-ops m-20261106T171020-c4d5): after a
+    /// restart the first probe came about 1 s later and counted, and all 41
+    /// health_probe rows in worker-restarts.jsonl to 11-06 have uptime under
+    /// 70 s against a 90 s budget (interval 30, threshold 3). The crash backoff
+    /// sleeps past a tick, so the overdue tick must not fire at the new daemon.
+    #[tokio::test]
+    async fn crash_respawn_gets_a_full_interval_before_the_next_probe() {
+        let dir = temp_repo_dir("shell-exec-grace-crash");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let spawns = dir.join("spawns.log");
+        let probes = dir.join("probes.log");
+
+        // Generation 1 exits at once; the 4 s backoff outlasts the tick at 3 s.
+        let daemon = format!(
+            "echo x >> {m}; if [ $(wc -l < {m}) -le 1 ]; then sleep 0.3; exit 1; else sleep 300; fi",
+            m = spawns.display()
+        );
+        let exec = Exec::new(ExecConfig {
+            stanza: None,
+            watch: None,
+            exec: vec![daemon],
+            restart: Some(RestartPolicy {
+                on_crash: true,
+                backoff_secs: 4,
+                max_backoff_secs: 4,
+            }),
+            health: Some(HealthCheck {
+                url: None,
+                command: Some(format!("echo x >> {}", probes.display())),
+                interval_secs: 3,
+                timeout_secs: 2,
+                failure_threshold: 10,
+            }),
+        });
+
+        let runner = tokio::spawn({
+            let exec = exec.clone();
+            async move { exec.run().await }
+        });
+        let gap = gap_from_respawn_to_next_probe(&spawns, &probes).await;
+        exec.shutdown().await;
+        let _ = runner.await.expect("join run task");
+
+        assert!(
+            gap >= Duration::from_secs(2),
+            "a respawned daemon gets a full 3 s interval before its first probe, got {gap:?}"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// Incident probegrace1113, the probe-kill path: the probe's own run time
+    /// used to come out of the next daemon's first interval, because the timer
+    /// kept its old schedule across the respawn (rows with uptime 34 s).
+    #[tokio::test]
+    async fn probe_kill_respawn_gets_a_full_interval_before_the_next_probe() {
+        let dir = temp_repo_dir("shell-exec-grace-kill");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let spawns = dir.join("spawns.log");
+        let probes = dir.join("probes.log");
+
+        let exec = Exec::new(ExecConfig {
+            stanza: None,
+            watch: None,
+            exec: vec![format!("echo x >> {}; sleep 300", spawns.display())],
+            restart: None,
+            // Tick at 3 s, the failing probe ends at 5 s, respawn. The old
+            // schedule ticks again at 6 s, 1 s into the new daemon's life.
+            health: Some(HealthCheck {
+                url: None,
+                command: Some(format!("echo x >> {}; sleep 2; exit 1", probes.display())),
+                interval_secs: 3,
+                timeout_secs: 3,
+                failure_threshold: 1,
+            }),
+        });
+
+        let runner = tokio::spawn({
+            let exec = exec.clone();
+            async move { exec.run().await }
+        });
+        let gap = gap_from_respawn_to_next_probe(&spawns, &probes).await;
+        exec.shutdown().await;
+        let _ = runner.await.expect("join run task");
+
+        assert!(
+            gap >= Duration::from_secs(2),
+            "a respawned daemon gets a full 3 s interval before its first probe, got {gap:?}"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
     /// A crash restart ends the failure streak: a later probe restart must not
     /// list probe failures from the daemon generation that already died.
     #[tokio::test]
