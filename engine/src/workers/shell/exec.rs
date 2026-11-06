@@ -413,6 +413,7 @@ impl Exec {
                             retry_spawn_at = Some(self.note_spawn_failure(&daemon_cmd, &mut backoff));
                         }
                         started_at = std::time::Instant::now();
+                        reset_probe_timer(&mut health_timer);
                         health_failures = 0;
                         failed_probes.clear();
                     } else if let Some(at) = retry_spawn_at
@@ -435,6 +436,7 @@ impl Exec {
                             retry_spawn_at = None;
                             retry_full_pipeline = false;
                             started_at = std::time::Instant::now();
+                            reset_probe_timer(&mut health_timer);
                         } else {
                             retry_spawn_at = Some(self.note_spawn_failure(&daemon_cmd, &mut backoff));
                         }
@@ -481,6 +483,7 @@ impl Exec {
                                     retry_spawn_at = Some(self.note_spawn_failure(&daemon_cmd, &mut backoff));
                                 }
                                 started_at = std::time::Instant::now();
+                                reset_probe_timer(&mut health_timer);
                                 health_failures = 0;
                             }
                         }
@@ -526,6 +529,7 @@ impl Exec {
                             retry_full_pipeline = true;
                         }
                         started_at = std::time::Instant::now();
+                        reset_probe_timer(&mut health_timer);
                         health_failures = 0;
                         failed_probes.clear();
                     }
@@ -828,6 +832,16 @@ impl Exec {
 }
 
 /// Tick the interval when present; otherwise never resolve.
+/// A new daemon gets the same full interval before its first probe that the
+/// first start gets. Without this the timer keeps its old schedule across the
+/// restart, and a tick that came due during the backoff or the probe run hits
+/// the new process at once (probegrace1113).
+fn reset_probe_timer(timer: &mut Option<tokio::time::Interval>) {
+    if let Some(iv) = timer {
+        iv.reset();
+    }
+}
+
 async fn tick_opt(timer: &mut Option<tokio::time::Interval>) {
     match timer {
         Some(iv) => {
@@ -1863,10 +1877,7 @@ mod tests {
 
     /// Non-empty lines in a marker file; a missing file counts as zero.
     fn marker_lines(path: &Path) -> usize {
-        fs::read_to_string(path)
-            .unwrap_or_default()
-            .lines()
-            .count()
+        fs::read_to_string(path).unwrap_or_default().lines().count()
     }
 
     /// Time from the daemon's second spawn to the first probe after it. The test
@@ -1984,6 +1995,105 @@ mod tests {
         );
 
         fs::remove_dir_all(dir).ok();
+    }
+
+    /// Incident probegrace1113, the spawn retry path: a start that only succeeds
+    /// on retry is a new daemon too, so it gets its full interval as well.
+    /// Generation 1 exits; the respawn at about 2.4 s fails and sets the timer to
+    /// about 5.4 s; the retry at about 4.5 s must move that tick out again.
+    #[tokio::test]
+    async fn spawn_retry_gets_a_full_interval_before_the_next_probe() {
+        let dir = temp_repo_dir("shell-exec-grace-retry");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let spawns = dir.join("spawns.log");
+        let probes = dir.join("probes.log");
+
+        let daemon = format!(
+            "echo x >> {m}; if [ $(wc -l < {m}) -le 1 ]; then sleep 0.3; exit 1; else sleep 300; fi",
+            m = spawns.display()
+        );
+        let exec = Exec::new(ExecConfig {
+            stanza: None,
+            watch: None,
+            exec: vec![daemon],
+            restart: Some(RestartPolicy {
+                on_crash: true,
+                backoff_secs: 2,
+                max_backoff_secs: 2,
+            }),
+            health: Some(HealthCheck {
+                url: None,
+                command: Some(format!("echo x >> {}", probes.display())),
+                interval_secs: 3,
+                timeout_secs: 2,
+                failure_threshold: 10,
+            }),
+        });
+        exec.fail_spawns
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+
+        let runner = tokio::spawn({
+            let exec = exec.clone();
+            async move { exec.run().await }
+        });
+        let gap = gap_from_respawn_to_next_probe(&spawns, &probes).await;
+        exec.shutdown().await;
+        let _ = runner.await.expect("join run task");
+
+        assert!(
+            gap >= Duration::from_secs(2),
+            "a daemon started by a spawn retry gets a full 3 s interval before its first probe, got {gap:?}"
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// Incident probegrace1113, the file watch path: the change lands just before
+    /// the 3 s tick, which must not then probe the restarted pipeline.
+    #[tokio::test]
+    async fn file_watch_restart_gets_a_full_interval_before_the_next_probe() {
+        let root = temp_repo_dir("shell-exec-grace-watch");
+        let watch_dir = root.join("watch");
+        fs::create_dir_all(&watch_dir).expect("create watch directory");
+        let watched_file = watch_dir.join("input.txt");
+        fs::write(&watched_file, "initial").expect("seed watched file");
+        let spawns = root.join("spawns.log");
+        let probes = root.join("probes.log");
+
+        let pattern = format!(
+            "{}/**/*.txt",
+            root.file_name().expect("temp dir name").to_string_lossy()
+        );
+        let exec = Exec::new(ExecConfig {
+            stanza: None,
+            watch: Some(vec![pattern]),
+            exec: vec![format!("echo x >> {}; sleep 300", spawns.display())],
+            restart: None,
+            health: Some(HealthCheck {
+                url: None,
+                command: Some(format!("echo x >> {}", probes.display())),
+                interval_secs: 3,
+                timeout_secs: 2,
+                failure_threshold: 10,
+            }),
+        });
+
+        let runner = tokio::spawn({
+            let exec = exec.clone();
+            async move { exec.run().await }
+        });
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        fs::write(&watched_file, "changed").expect("update watched file");
+        let gap = gap_from_respawn_to_next_probe(&spawns, &probes).await;
+        exec.shutdown().await;
+        let _ = runner.await.expect("join run task");
+
+        assert!(
+            gap >= Duration::from_secs(2),
+            "a pipeline restarted by a file change gets a full 3 s interval before its first probe, got {gap:?}"
+        );
+
+        fs::remove_dir_all(root).ok();
     }
 
     /// A crash restart ends the failure streak: a later probe restart must not
