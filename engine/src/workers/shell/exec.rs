@@ -63,6 +63,12 @@ pub struct Exec {
     /// (issuerstanza1102). Set by the engine from the entry, never by the
     /// stanza's own config. None only for a hand-built `Exec` in tests.
     stanza: Option<String>,
+    /// Test seam: the next N `spawn_single` calls after the first fail with an
+    /// io error, to prove the supervisor keeps retrying a failed spawn.
+    #[cfg(test)]
+    fail_spawns: Arc<std::sync::atomic::AtomicU32>,
+    #[cfg(test)]
+    spawn_calls: Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// Env var naming the pid record directory (see `Exec::pid_dir`).
@@ -102,6 +108,10 @@ impl Exec {
                 .filter(|v| !v.is_empty())
                 .map(std::path::PathBuf::from),
             stanza: config.stanza,
+            #[cfg(test)]
+            fail_spawns: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            #[cfg(test)]
+            spawn_calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -305,6 +315,11 @@ impl Exec {
             iv.tick().await;
         }
         let mut health_failures: u32 = 0;
+        // Set when a respawn could not start the process: the time of the next
+        // attempt. The supervisor keeps trying with doubling backoff, never
+        // gives up (svcdownalert1107: a failed spawn used to leave no child and
+        // nothing to notice it).
+        let mut retry_spawn_at: Option<std::time::Instant> = None;
         // Results of the probes in the current failure streak, oldest first.
         let mut failed_probes: Vec<String> = Vec::new();
 
@@ -353,13 +368,27 @@ impl Exec {
                                 _ = shutdown_rx.changed() => { self.stop_process().await; return; }
                             }
                         }
+                        backoff = plan.next_backoff;
                         if let Some(child) = self.respawn(&daemon_cmd).await {
                             *self.child.lock().await = Some(child);
+                        } else {
+                            retry_spawn_at = Some(self.note_spawn_failure(&daemon_cmd, &mut backoff));
                         }
                         started_at = std::time::Instant::now();
-                        backoff = plan.next_backoff;
                         health_failures = 0;
                         failed_probes.clear();
+                    } else if let Some(at) = retry_spawn_at
+                        && std::time::Instant::now() >= at
+                        && self.child.lock().await.is_none()
+                    {
+                        // A earlier respawn failed to start: try again.
+                        if let Some(child) = self.respawn(&daemon_cmd).await {
+                            *self.child.lock().await = Some(child);
+                            retry_spawn_at = None;
+                            started_at = std::time::Instant::now();
+                        } else {
+                            retry_spawn_at = Some(self.note_spawn_failure(&daemon_cmd, &mut backoff));
+                        }
                     }
                 }
                 // 2. Health probe tick.
@@ -395,6 +424,8 @@ impl Exec {
                                 self.kill_process().await;
                                 if let Some(child) = self.respawn(&daemon_cmd).await {
                                     *self.child.lock().await = Some(child);
+                                } else {
+                                    retry_spawn_at = Some(self.note_spawn_failure(&daemon_cmd, &mut backoff));
                                 }
                                 started_at = std::time::Instant::now();
                                 health_failures = 0;
@@ -472,9 +503,26 @@ impl Exec {
         }
     }
 
-    /// Respawn the daemon command. Returns the new child, or None on spawn
-    /// failure (loudly logged — supervision keeps running; a configured health
-    /// probe will retry it on the next interval).
+    /// A respawn failed to start the process. Write the `spawn_failed` restart
+    /// row (so the failure shows in the restart log and telemetry), grow the
+    /// delay, and return when to try again. The delay never stops growing past
+    /// the cap and the caller never stops retrying.
+    fn note_spawn_failure(&self, daemon_cmd: &str, backoff: &mut u64) -> std::time::Instant {
+        let init = self.restart.as_ref().map_or(0, |r| r.backoff_secs);
+        let max = self.restart.as_ref().map_or(0, |r| r.max_backoff_secs);
+        let wait = if *backoff == 0 { init } else { *backoff };
+        self.record_restart(
+            daemon_cmd,
+            "spawn_failed",
+            Duration::ZERO,
+            serde_json::json!({ "backoff_s": wait }),
+        );
+        *backoff = next_backoff(wait, init, max);
+        std::time::Instant::now() + Duration::from_secs(wait)
+    }
+
+    /// Returns the new child, or None on spawn failure (loudly logged; the
+    /// supervisor retries with backoff, see `note_spawn_failure`).
     async fn respawn(&self, command: &str) -> Option<Child> {
         match self.spawn_single(command) {
             Ok(child) => {
@@ -530,6 +578,16 @@ impl Exec {
     }
 
     fn spawn_single(&self, command: &str) -> Result<Child> {
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering::SeqCst;
+            let n = self.spawn_calls.fetch_add(1, SeqCst);
+            let left = self.fail_spawns.load(SeqCst);
+            if n >= 1 && left > 0 {
+                self.fail_spawns.store(left - 1, SeqCst);
+                anyhow::bail!("injected spawn failure");
+            }
+        }
         tracing::info!("Starting process: {}", command.purple());
 
         #[cfg(not(windows))]
@@ -1143,6 +1201,54 @@ mod tests {
             "daemon should have respawned, saw {spawns} spawn(s)"
         );
 
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// A respawn whose spawn fails must be retried with backoff, never dropped.
+    /// Before the fix the supervisor kept running with no child and no probe,
+    /// so a failed spawn left the service down forever.
+    #[tokio::test]
+    async fn failed_respawn_is_retried_until_it_starts() {
+        let dir = temp_repo_dir("shell-exec-spawnfail");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let marker = dir.join("spawns.log");
+        let exec = Exec::new(ExecConfig {
+            stanza: None,
+            watch: None,
+            exec: vec![format!("echo x >> {}; exit 1", marker.display())],
+            restart: Some(RestartPolicy {
+                on_crash: true,
+                backoff_secs: 1,
+                max_backoff_secs: 2,
+            }),
+            health: None,
+        });
+        let mut exec = exec;
+        exec.healthy_floor_secs = 0;
+        // First spawn works and exits 1; the next three spawns fail.
+        exec.fail_spawns
+            .store(3, std::sync::atomic::Ordering::SeqCst);
+        let runner = tokio::spawn({
+            let exec = exec.clone();
+            async move { exec.run().await }
+        });
+        let count = || {
+            fs::read_to_string(&marker)
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while count() < 2 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let spawns = count();
+        exec.shutdown().await;
+        let _ = runner.await.expect("join run task");
+        assert!(
+            spawns >= 2,
+            "supervisor gave up after a failed spawn: {spawns} start(s)"
+        );
         fs::remove_dir_all(dir).ok();
     }
 
