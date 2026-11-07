@@ -237,13 +237,25 @@ impl Exec {
 
         // 🔥 start pipeline
         let mut first_start_failed = false;
+        let supervised = self.restart.is_some() || self.health.is_some();
         if let Err(e) = self.run_pipeline().await {
-            if self.restart.is_none() && self.health.is_none() {
+            if !supervised {
                 return Err(e);
             }
             // A supervised stanza never gives up: supervise() retries the
             // whole pipeline with backoff (svcdownalert1107).
             tracing::error!("exec first start failed, supervisor will retry: {e}");
+            first_start_failed = true;
+        } else if supervised
+            && !self.exec.is_empty()
+            && !*self.shutdown_rx.borrow()
+            && self.child.lock().await.is_none()
+        {
+            // A pre-step exited non-zero: run_pipeline stops there with Ok and
+            // no daemon. That is a failed start too (review of c276f912).
+            tracing::error!(
+                "exec first start left no daemon (a pre-step failed), supervisor will retry"
+            );
             first_start_failed = true;
         }
 
@@ -309,7 +321,8 @@ impl Exec {
         // The daemon is the last pipeline command (already spawned by
         // run_pipeline, sitting in self.child). Respawns re-run ONLY this
         // command — earlier pipeline steps (e.g. a `pkill` cleanup) ran once at
-        // startup and are deliberately not repeated on each crash.
+        // startup and are not repeated on each crash. They do re-run when a start
+        // or a file-watch restart left no daemon, so they must be idempotent.
         let daemon_cmd = match self.exec.last() {
             Some(cmd) => cmd.clone(),
             None => {
@@ -1495,6 +1508,48 @@ mod tests {
         exec.shutdown().await;
         let _ = runner.await.expect("join run task");
         assert!(started, "stanza never started after a failed first spawn");
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// Review finding on c276f912: a pre-step that exits non-zero makes
+    /// run_pipeline return Ok with no daemon. A supervised stanza must treat
+    /// that as a failed start and retry, not sit down forever.
+    #[tokio::test]
+    async fn failed_prestep_at_first_start_is_retried() {
+        let dir = temp_repo_dir("shell-exec-prestepfail");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let flag = dir.join("flag");
+        let marker = dir.join("spawns.log");
+        let mut exec = Exec::new(ExecConfig {
+            stanza: None,
+            watch: None,
+            exec: vec![
+                format!(
+                    "test -f {f} || {{ touch {f}; exit 1; }}",
+                    f = flag.display()
+                ),
+                format!("echo x >> {}; sleep 30", marker.display()),
+            ],
+            restart: Some(RestartPolicy {
+                on_crash: true,
+                backoff_secs: 1,
+                max_backoff_secs: 2,
+            }),
+            health: None,
+        });
+        exec.healthy_floor_secs = 0;
+        let runner = tokio::spawn({
+            let exec = exec.clone();
+            async move { exec.run().await }
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let started = marker.exists();
+        exec.shutdown().await;
+        let _ = runner.await.expect("join run task");
+        assert!(started, "daemon never started after a failed pre-step");
         fs::remove_dir_all(dir).ok();
     }
 
